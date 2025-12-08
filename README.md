@@ -40,6 +40,7 @@ All models are trained exclusively on **public academic datasets**.
 
 
 ## 📰 News
+- **08-12-2025:** 📊 [Benchmark evaluation pipeline](docs/BENCHMARK.md) released! Evaluate pose estimation & 3D reconstruction on 5 datasets.
 - **30-11-2025:** Add [`use_ray_pose`](#use-ray-pose) and [`ref_view_strategy`](docs/funcs/ref_view_strategy.md) (reference view selection for multi-view inputs).   
 - **25-11-2025:** Add [Awesome DA3 Projects](#-awesome-da3-projects), a community-driven section featuring DA3-based applications.
 - **14-11-2025:** Paper, project page, code and models are all released.
@@ -198,7 +199,7 @@ Model = create_object(load_config("path/to/new/config"))
 
 - 🖥️ [Command Line Interface](docs/CLI.md)
 - 📑 [Python API](docs/API.md)
-<!-- - 🏁 [Visual Geometry Benchmark](docs/BENCHMARK.md) -->
+- 📊 [Benchmark Evaluation](docs/BENCHMARK.md)
 
 ## 🗂️ Model Cards
 
