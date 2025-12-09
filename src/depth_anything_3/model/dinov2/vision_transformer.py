@@ -311,7 +311,7 @@ class DinoVisionTransformer(nn.Module):
                 g_pos = pos_nodiff
                 l_pos = pos
 
-            if self.alt_start != -1 and (i == self.alt_start - 1) and x.shape[1] >= THRESH_FOR_REF_SELECTION:
+            if self.alt_start != -1 and (i == self.alt_start - 1) and x.shape[1] >= THRESH_FOR_REF_SELECTION and kwargs.get("cam_token", None) is None:
                 # Select reference view using configured strategy
                 strategy = kwargs.get("ref_view_strategy", "saddle_balanced")
                 logger.info(f"Selecting reference view using strategy: {strategy}")
