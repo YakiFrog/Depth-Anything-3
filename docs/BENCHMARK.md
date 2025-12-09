@@ -1,6 +1,12 @@
-# 📏 DepthAnything3 Benchmark Evaluation
+# 📏 Visual Geometry Benchmark
 
-This document provides comprehensive instructions for running benchmark evaluation on DepthAnything3.
+This document provides comprehensive instructions for running benchmark evaluation on Depth Anything 3.
+
+## ✨ Highlights
+
+- 🗂️ **Diverse and Challenging Datasets**: 5 datasets (ETH3D, 7Scenes, ScanNet++, HiRoom, DTU) covering from objects to indoor and outdoor scenes. Part of datasets are recalibrated for high accuracy (see [ScanNet++](#scannet) details). All preprocessed datasets are uploaded to [depth-anything/DA3-BENCH](https://huggingface.co/datasets/depth-anything/DA3-BENCH).
+- 🔧 **Robust Evaluation Pipeline**: Standardized pipeline featuring RANSAC-based pose alignment for better coordinate system alignment, TSDF fusion for directly reflecting depth 3D consistency.
+- 📊 **Standardized Metrics**: Performance measured using established metrics: AUC for pose accuracy, F1-score and Chamfer Distance for reconstruction.
 
 ---
 
@@ -325,6 +331,12 @@ High-quality indoor RGB-D dataset with dense annotations.
 - **Scenes:** 20 validation scenes
 - **Resolution:** 768×1024 (after undistortion)
 - **GT:** High-quality meshes from FARO scanner
+
+> **⚠️ Camera Pose Re-calibration:** The default ScanNet++ poses are often inaccurate due to motion blur and textureless frames from iPhone captures. We re-ran COLMAP with the following improvements:
+> - **Frame filtering:** Removed blurry images during frame extraction
+> - **Fisheye calibration:** Jointly calibrated fisheye camera for wider FOV and better accuracy
+> - **Exhaustive matching:** Used COLMAP's exhaustive matcher and mapper for reliable poses (takes several days per scene but necessary for quality)
+> - All processed scenes are available at [haotongl/scannetpp_zipnerf](https://huggingface.co/datasets/haotongl/scannetpp_zipnerf)
 
 ### HiRoom
 
