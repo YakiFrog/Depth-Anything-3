@@ -641,9 +641,15 @@ Examples:
     debug = config.inference.debug
     num_fusion_workers = config.inference.num_fusion_workers
 
-    # GPU settings (not in config, always from environment)
+    # GPU settings: parse from CLI dotlist args (gpu_id=X total_gpus=Y)
+    # These are passed by the main process when spawning workers
     gpu_id = 0
     total_gpus = 1
+    for arg in argv:
+        if arg.startswith("gpu_id="):
+            gpu_id = int(arg.split("=")[1])
+        elif arg.startswith("total_gpus="):
+            total_gpus = int(arg.split("=")[1])
 
     # Override dataset scenes if specified
     if scenes:
