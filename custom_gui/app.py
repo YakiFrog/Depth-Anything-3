@@ -2,14 +2,16 @@ import sys
 import os
 import numpy as np
 import cv2
+import time
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QFileDialog, QLabel)
+                             QHBoxLayout, QPushButton, QFileDialog, QLabel, QComboBox)
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtCore import Qt, Slot
 import requests
 import threading
 import subprocess
-import time
+import webbrowser
+import queue
 from depth_processor import DepthProcessor
 
 class MainWindow(QMainWindow):
@@ -42,14 +44,49 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop_processing)
         self.stop_button.setEnabled(False)
+
+        self.model_combo = QComboBox()
+        self.model_combo.addItems([
+            "depth-anything/DA3-SMALL",
+            "depth-anything/DA3-BASE",
+            "depth-anything/DA3-LARGE-1.1",
+            "depth-anything/DA3-GIANT-1.1",
+            "depth-anything/DA3METRIC-LARGE",
+            "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+        ])
+        self.model_combo.setToolTip("Select DA3 Model")
+
+        self.res_combo = QComboBox()
+        self.res_combo.addItems(["504", "756", "1008"])
+        self.res_combo.setCurrentText("756")
+        self.res_combo.setToolTip("Processing Resolution")
+
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["saddle_balanced", "first", "middle"])
+        self.strategy_combo.setToolTip("Reference View Strategy (Fast vs High Quality)")
+
+        self.view_3d_button = QPushButton("Open 3D Viewer")
+        self.view_3d_button.clicked.connect(self.open_3d_viewer)
         
         self.controls_layout.addWidget(self.load_button)
+        self.controls_layout.addWidget(QLabel("Model:"))
+        self.controls_layout.addWidget(self.model_combo)
+        self.controls_layout.addWidget(QLabel("Res:"))
+        self.controls_layout.addWidget(self.res_combo)
+        self.controls_layout.addWidget(QLabel("Strategy:"))
+        self.controls_layout.addWidget(self.strategy_combo)
         self.controls_layout.addWidget(self.start_button)
         self.controls_layout.addWidget(self.stop_button)
+        self.controls_layout.addWidget(self.view_3d_button)
         self.layout.addLayout(self.controls_layout)
 
         self.processor = None
         self.video_path = None
+        
+        # 3D Viewer Update Management
+        self.viewer_queue = queue.Queue(maxsize=1)
+        self.viewer_thread = threading.Thread(target=self.viewer_update_worker, daemon=True)
+        self.viewer_thread.start()
         
         # Start Server
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +95,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("3D Viewer Server started at http://localhost:8000")
 
     def closeEvent(self, event):
+        if self.processor and self.processor.isRunning():
+            self.processor.stop()
+            self.processor.wait()
         if self.server_process:
             self.server_process.terminate()
         event.accept()
@@ -69,28 +109,46 @@ class MainWindow(QMainWindow):
             self.start_button.setEnabled(True)
             self.statusBar().showMessage(f"Loaded: {os.path.basename(file_path)}")
 
+    def open_3d_viewer(self):
+        webbrowser.open("http://localhost:8000")
+
     def start_processing(self):
         if self.video_path:
-            self.processor = DepthProcessor(self.video_path)
+            selected_model = self.model_combo.currentText()
+            res = int(self.res_combo.currentText())
+            strategy = self.strategy_combo.currentText()
+            # For SMALL, we use batch_size=4 to boost speed. 
+            # For larger models, keep it at 1 to avoid OOM or slow UI response.
+            batch_size = 4 if "SMALL" in selected_model else 1
+            
+            self.processor = DepthProcessor(self.video_path, model_name=selected_model, process_res=res, batch_size=batch_size, strategy=strategy)
             self.processor.frame_processed.connect(self.update_frames)
             self.processor.finished.connect(self.on_finished)
+            
             self.processor.start()
             self.start_button.setEnabled(False)
             self.stop_button.setEnabled(True)
             self.load_button.setEnabled(False)
+            self.model_combo.setEnabled(False)
+            self.res_combo.setEnabled(False)
 
     def stop_processing(self):
         if self.processor:
             self.processor.stop()
+            self.processor.wait()
+            self.on_finished()
 
     def on_finished(self):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.load_button.setEnabled(True)
-        self.statusBar().showMessage("Processing Finished")
+        self.model_combo.setEnabled(True)
+        self.res_combo.setEnabled(True)
+        self.strategy_combo.setEnabled(True)
+        self.statusBar().showMessage("Processing Finished or Stopped")
 
-    @Slot(np.ndarray, np.ndarray)
-    def update_frames(self, rgb_frame, depth_map):
+    @Slot(np.ndarray, np.ndarray, np.ndarray)
+    def update_frames(self, rgb_frame, depth_map, extrinsics):
         # Update RGB Frame
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
@@ -98,17 +156,18 @@ class MainWindow(QMainWindow):
         self.rgb_label.setPixmap(QPixmap.fromImage(q_rgb).scaled(580, 480, Qt.KeepAspectRatio))
 
         # Update Depth Map
-        # Normalize depth for visualization (0-255)
-        depth_min = depth_map.min()
-        depth_max = depth_map.max()
-        if depth_max - depth_min > 0:
-            norm_depth = (depth_map - depth_min) / (depth_max - depth_min) * 255.0
+        # Robust normalization using percentiles to ignore outliers
+        p_min = np.percentile(depth_map, 2)
+        p_max = np.percentile(depth_map, 98)
+        
+        if p_max - p_min > 0:
+            norm_depth = np.clip((depth_map - p_min) / (p_max - p_min) * 255.0, 0, 255)
         else:
-            norm_depth = depth_map * 0
+            norm_depth = np.zeros_like(depth_map)
         
         norm_depth = norm_depth.astype(np.uint8)
-        # Apply colormap for better visualization
-        depth_color = cv2.applyColorMap(norm_depth, cv2.COLORMAP_VIRIDIS)
+        # Apply colormap (MAGMA is usually clearer for depth)
+        depth_color = cv2.applyColorMap(norm_depth, cv2.COLORMAP_MAGMA)
         depth_color = cv2.cvtColor(depth_color, cv2.COLOR_BGR2RGB)
         
         dh, dw, dch = depth_color.shape
@@ -116,25 +175,42 @@ class MainWindow(QMainWindow):
         q_depth = QImage(depth_color.data, dw, dh, d_bytes_per_line, QImage.Format_RGB888)
         self.depth_label.setPixmap(QPixmap.fromImage(q_depth).scaled(580, 480, Qt.KeepAspectRatio))
 
-        # Send to 3D Viewer (Downsample for performance)
-        threading.Thread(target=self.send_to_viewer, args=(rgb_frame, depth_map), daemon=True).start()
-
-    def send_to_viewer(self, rgb, depth):
+        # Queue for 3D Viewer
         try:
-            # Downsample further if needed or just send
-            # We'll send a downsampled version to the viewer for speed
+            self.viewer_queue.put_nowait((rgb_frame, depth_map, extrinsics))
+        except queue.Full:
+            pass
+
+    def viewer_update_worker(self):
+        while True:
+            try:
+                rgb, depth, ext = self.viewer_queue.get(timeout=1.0)
+                self.send_to_viewer(rgb, depth, ext)
+                self.viewer_queue.task_done()
+                import time
+                time.sleep(0.05) # Cap at ~20fps for viewer
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Viewer worker error: {e}")
+
+    def send_to_viewer(self, rgb, depth, extrinsics):
+        try:
+            # Simple check to see if server is likely up (port check could be more robust)
+            # We'll just try to send and catch errors silently if it's not yet ready
             h, w = depth.shape
-            scale = 0.5
+            scale = 0.25
             d_small = cv2.resize(depth, (int(w*scale), int(h*scale)))
             rgb_small = cv2.resize(rgb, (int(w*scale), int(h*scale)))
             
             data = {
                 "depth": d_small.flatten().tolist(),
                 "rgb": rgb_small.flatten().tolist(),
+                "extrinsics": extrinsics.tolist(),
                 "width": int(w*scale),
                 "height": int(h*scale)
             }
-            requests.post("http://localhost:8000/update", json=data, timeout=0.1)
+            requests.post("http://localhost:8000/update", json=data, timeout=0.5)
         except Exception as e:
             print(f"Error sending to viewer: {e}")
 

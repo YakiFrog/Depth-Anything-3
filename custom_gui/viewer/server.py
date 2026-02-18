@@ -25,7 +25,8 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             await websocket.receive_text() # Just keep connection alive
-    except:
+    except Exception as e:
+        print(f"WS Error/Closed: {e}")
         active_connections.remove(websocket)
 
 async def broadcast_data(data):
@@ -36,6 +37,7 @@ async def broadcast_data(data):
 async def update_data(data: dict):
     global latest_data
     latest_data = data
+    # print(f"Received update. Keys: {data.keys()}")
     await broadcast_data(data)
     return {"status": "ok"}
 
