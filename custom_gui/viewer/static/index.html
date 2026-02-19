@@ -60,6 +60,8 @@
         <input type="range" id="pointSize" min="1" max="50" value="10">
         <label><input type="checkbox" id="usePose"> Use Pose</label>
         <label><input type="checkbox" id="worldFixed"> World Fixed</label>
+        <label><input type="checkbox" id="showMap"> Show Map</label>
+        <button id="clearMapBtn">Clear Map</button>
         <button id="resetCamBtn">Reset</button>
         <div id="debugInfo" style="margin-left: 10px; font-family: monospace; font-size: 10px; color: #aaa;"></div>
         <div id="status">Waiting...</div>
@@ -80,8 +82,14 @@
         let scene, camera, renderer, controls, points, cameraHelper;
         let geometry, material, trajectoryLine, trajectoryGeometry;
         const MAX_POINTS = 100000;
+        const MAX_MAP_POINTS = 1000000;
         const MAX_TRAJECTORY_POINTS = 5000;
         let data_received_count = 0;
+
+        // Environment Map state
+        let mapGeometry, mapMaterial, mapPoints;
+        let mapPointCount = 0;
+        let lastProcessedFrameIndices = new Set();
 
         // Playback state
         let frames = [];
@@ -97,6 +105,8 @@
         const pointSizeSlider = document.getElementById('pointSize');
         const usePoseCheckbox = document.getElementById('usePose');
         const worldFixedCheckbox = document.getElementById('worldFixed');
+        const showMapCheckbox = document.getElementById('showMap');
+        const clearMapBtn = document.getElementById('clearMapBtn');
         const resetCamBtn = document.getElementById('resetCamBtn');
         const debugInfoDiv = document.getElementById('debugInfo');
         const statusDiv = document.getElementById('status');
@@ -144,6 +154,17 @@
 
             scene.add(cameraHelper);
 
+            // Environment Map
+            mapGeometry = new THREE.BufferGeometry();
+            const mapPositions = new Float32Array(MAX_MAP_POINTS * 3);
+            const mapColors = new Float32Array(MAX_MAP_POINTS * 3);
+            mapGeometry.setAttribute('position', new THREE.BufferAttribute(mapPositions, 3));
+            mapGeometry.setAttribute('color', new THREE.BufferAttribute(mapColors, 3));
+            mapMaterial = new THREE.PointsMaterial({ size: 0.05, vertexColors: true, opacity: 0.6, transparent: true });
+            mapPoints = new THREE.Points(mapGeometry, mapMaterial);
+            mapPoints.frustumCulled = false;
+            scene.add(mapPoints);
+
             // Trajectory
             trajectoryGeometry = new THREE.BufferGeometry();
             const trajPositions = new Float32Array(MAX_TRAJECTORY_POINTS * 3);
@@ -177,6 +198,18 @@
                 camera.lookAt(0, 0, 0);
                 controls.reset();
             };
+
+            clearMapBtn.onclick = () => {
+                mapPointCount = 0;
+                mapGeometry.setDrawRange(0, 0);
+                mapGeometry.attributes.position.needsUpdate = true;
+                mapGeometry.attributes.color.needsUpdate = true;
+                lastProcessedFrameIndices.clear();
+            };
+
+            showMapCheckbox.onchange = () => {
+                mapPoints.visible = showMapCheckbox.checked;
+            };
         }
 
         function updateUI() {
@@ -198,8 +231,8 @@
                 try {
                     const data = JSON.parse(event.data);
                     frames.push(data);
-                    // Keep buffer manageable (e.g., 2000 frames)
-                    if (frames.length > 2000) frames.shift();
+                    // Keep buffer large but manageable (e.g., 100,000 frames)
+                    if (frames.length > 100000) frames.shift();
 
                     // If not paused, and we were at the end or it's the first frame, advance
                     if (!isPaused && (currentFrameIndex === frames.length - 2 || frames.length === 1)) {
@@ -327,6 +360,67 @@
             geometry.attributes.position.needsUpdate = true;
             geometry.attributes.color.needsUpdate = true;
             geometry.computeBoundingSphere();
+
+            // Accumulate to Map
+            if (showMapCheckbox.checked && usePoseCheckbox.checked && extrinsics && extrinsics.length === 16) {
+                // Only process each unique frame index once for the map to avoid over-accumulation
+                const frameId = data.frame_index !== undefined ? data.frame_index : frames.indexOf(data);
+                if (!lastProcessedFrameIndices.has(frameId)) {
+                    accumulateToMap(data, count, step);
+                    lastProcessedFrameIndices.add(frameId);
+                    // Keep the set size reasonable
+                    if (lastProcessedFrameIndices.size > 100) {
+                        const first = lastProcessedFrameIndices.values().next().value;
+                        lastProcessedFrameIndices.delete(first);
+                    }
+                }
+            }
+        }
+
+        function accumulateToMap(data, framePointCount, step) {
+            const depth = data.depth;
+            const rgb = data.rgb;
+            const width = data.width;
+            const height = data.height;
+            const extrinsics = data.extrinsics;
+
+            const matW2C = new THREE.Matrix4().fromArray(extrinsics).transpose();
+            const matC2W_OpenCV = new THREE.Matrix4().copy(matW2C).invert();
+            const F = new THREE.Matrix4().makeScale(1, -1, -1);
+            const matC2W_Three = new THREE.Matrix4().copy(F).multiply(matC2W_OpenCV).multiply(F);
+
+            const mapPositions = mapGeometry.attributes.position.array;
+            const mapColors = mapGeometry.attributes.color.array;
+            const scaleFactor = parseFloat(depthScaleSlider.value) * 0.01;
+
+            // Map accumulation might need even more aggressive downsampling
+            const mapStep = Math.max(step, Math.floor((width * height) / 5000)); // Max 5000 points per frame for map
+
+            for (let i = 0; i < width * height; i += mapStep) {
+                if (mapPointCount >= MAX_MAP_POINTS) break;
+
+                const lx = ((i % width) - width / 2) * 0.01;
+                const ly = (-(Math.floor(i / width)) + height / 2) * 0.01;
+                let lz = -depth[i] * scaleFactor;
+                if (isNaN(lz) || !isFinite(lz)) lz = 0;
+
+                const localPos = new THREE.Vector3(lx, ly, lz);
+                const worldPos = localPos.applyMatrix4(matC2W_Three);
+
+                mapPositions[mapPointCount * 3] = worldPos.x;
+                mapPositions[mapPointCount * 3 + 1] = worldPos.y;
+                mapPositions[mapPointCount * 3 + 2] = worldPos.z;
+
+                mapColors[mapPointCount * 3] = (rgb[i * 3] || 0) / 255;
+                mapColors[mapPointCount * 3 + 1] = (rgb[i * 3 + 1] || 0) / 255;
+                mapColors[mapPointCount * 3 + 2] = (rgb[i * 3 + 2] || 0) / 255;
+
+                mapPointCount++;
+            }
+
+            mapGeometry.setDrawRange(0, mapPointCount);
+            mapGeometry.attributes.position.needsUpdate = true;
+            mapGeometry.attributes.color.needsUpdate = true;
         }
 
         function updateTrajectory() {
