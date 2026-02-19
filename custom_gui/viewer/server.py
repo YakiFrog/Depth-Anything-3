@@ -35,9 +35,9 @@ async def broadcast_data(data):
 
 @app.post("/update")
 async def update_data(data: dict):
+    print(f"DEBUG: Server received update. Keys: {list(data.keys())}")
     global latest_data
     latest_data = data
-    # print(f"Received update. Keys: {data.keys()}")
     await broadcast_data(data)
     return {"status": "ok"}
 
