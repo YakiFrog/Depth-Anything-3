@@ -139,10 +139,15 @@ class DA3_Streaming:
         self.overlap_e = self.overlap - self.overlap_s
         self.conf_threshold = 1.5
         self.seed = 42
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = (
-            torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-        )
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            self.dtype = torch.float16
+        else:
+            self.device = "cpu"
+            self.dtype = torch.float32
 
         self.img_dir = image_dir
         self.img_list = None
@@ -163,16 +168,18 @@ class DA3_Streaming:
 
         self.delete_temp_files = self.config["Model"]["delete_temp_files"]
 
-        print("Loading model...")
-
-        with open(self.config["Weights"]["DA3_CONFIG"]) as f:
-            config = json.load(f)
-        self.model = DepthAnything3(**config)
-        weight = load_file(self.config["Weights"]["DA3"])
-        self.model.load_state_dict(weight, strict=False)
-
-        self.model.eval()
-        self.model = self.model.to(self.device)
+        if os.path.exists(self.config["Weights"]["DA3_CONFIG"]) and os.path.exists(self.config["Weights"]["DA3"]):
+            print("Loading model...")
+            with open(self.config["Weights"]["DA3_CONFIG"]) as f:
+                config = json.load(f)
+            self.model = DepthAnything3(**config)
+            weight = load_file(self.config["Weights"]["DA3"])
+            self.model.load_state_dict(weight, strict=False)
+            self.model.eval()
+            self.model = self.model.to(self.device)
+        else:
+            print("Skipping internal model loading (model will be injected later).")
+            self.model = None
 
         self.skyseg_session = None
 
@@ -264,9 +271,9 @@ class DA3_Streaming:
             "ref_view_strategy" if not is_loop else "ref_view_strategy_loop"
         ]
 
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
         with torch.no_grad():
-            with torch.cuda.amp.autocast(dtype=self.dtype):
+            with torch.autocast(device_type=self.device, dtype=self.dtype):
                 images = chunk_image_paths
                 # images: ['xxx.png', 'xxx.png', ...]
 
@@ -280,7 +287,7 @@ class DA3_Streaming:
                 print(predictions.conf.shape)  # [N, H, W] float32
                 print(predictions.extrinsics.shape)  # [N, 3, 4] float32 (w2c)
                 print(predictions.intrinsics.shape)  # [N, 3, 3] float32
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
         # Save predictions to disk instead of keeping in memory
         if is_loop:
@@ -540,7 +547,7 @@ class DA3_Streaming:
             cur_predictions = self.process_single_chunk(
                 self.chunk_indices[chunk_idx], chunk_idx=chunk_idx
             )
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
 
             if chunk_idx > 0:
                 print(
@@ -590,7 +597,7 @@ class DA3_Streaming:
             self.loop_list = self.get_loop_pairs()
             del self.loop_detector  # Save GPU Memory
 
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
 
             print("Loop SIM(3) estimating...")
             loop_results = process_loop_list(

@@ -140,7 +140,12 @@ class LoopDetector:
 
         model.load_state_dict(torch.load(self.ckpt_path))
         model = model.eval()
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
         model = model.to(device)
         print(f"Model loaded: {self.ckpt_path}")
 
@@ -196,7 +201,7 @@ class LoopDetector:
 
             with torch.no_grad():
                 with torch.autocast(
-                    device_type="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.float16
+                    device_type=self.device.type, dtype=torch.float16
                 ):
                     batch_descriptors = self.model(batch_tensor).cpu()
 

@@ -20,7 +20,10 @@ import os
 import numpy as np
 import trimesh
 from loop_utils.alignment_torch import robust_weighted_estimate_sim3_torch
-from loop_utils.alignment_triton import robust_weighted_estimate_sim3_triton
+try:
+    from loop_utils.alignment_triton import robust_weighted_estimate_sim3_triton
+except Exception:
+    robust_weighted_estimate_sim3_triton = None
 from numba import njit
 from sklearn.linear_model import LinearRegression, RANSACRegressor
 
