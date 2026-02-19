@@ -59,7 +59,9 @@
         <span>Point Size:</span>
         <input type="range" id="pointSize" min="1" max="50" value="10">
         <label><input type="checkbox" id="usePose"> Use Pose</label>
+        <label><input type="checkbox" id="worldFixed"> World Fixed</label>
         <button id="resetCamBtn">Reset</button>
+        <div id="debugInfo" style="margin-left: 10px; font-family: monospace; font-size: 10px; color: #aaa;"></div>
         <div id="status">Waiting...</div>
     </div>
 
@@ -76,8 +78,9 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
         let scene, camera, renderer, controls, points, cameraHelper;
-        let geometry, material;
+        let geometry, material, trajectoryLine, trajectoryGeometry;
         const MAX_POINTS = 100000;
+        const MAX_TRAJECTORY_POINTS = 5000;
         let data_received_count = 0;
 
         // Playback state
@@ -93,7 +96,9 @@
         const depthScaleSlider = document.getElementById('depthScale');
         const pointSizeSlider = document.getElementById('pointSize');
         const usePoseCheckbox = document.getElementById('usePose');
+        const worldFixedCheckbox = document.getElementById('worldFixed');
         const resetCamBtn = document.getElementById('resetCamBtn');
+        const debugInfoDiv = document.getElementById('debugInfo');
         const statusDiv = document.getElementById('status');
 
         init();
@@ -138,6 +143,14 @@
             cameraHelper.add(camAxes);
 
             scene.add(cameraHelper);
+
+            // Trajectory
+            trajectoryGeometry = new THREE.BufferGeometry();
+            const trajPositions = new Float32Array(MAX_TRAJECTORY_POINTS * 3);
+            trajectoryGeometry.setAttribute('position', new THREE.BufferAttribute(trajPositions, 3));
+            const trajMat = new THREE.LineBasicMaterial({ color: 0xffff00 });
+            trajectoryLine = new THREE.Line(trajectoryGeometry, trajMat);
+            scene.add(trajectoryLine);
 
             window.addEventListener('resize', onWindowResize, false);
 
@@ -220,35 +233,55 @@
 
             if (!depth || !rgb) return;
 
-            // Handle Pose
+            // Handle Pose and Trajectory
             if (extrinsics && extrinsics.length === 16 && usePoseCheckbox.checked) {
                 const matW2C = new THREE.Matrix4().fromArray(extrinsics).transpose();
                 const matC2W_OpenCV = new THREE.Matrix4().copy(matW2C).invert();
 
-                // Correct conversion from OpenCV C2W to Three.js C2W
-                // Let F = diag(1, -1, -1). Then M_three = F * M_cv * F
                 const F = new THREE.Matrix4().makeScale(1, -1, -1);
                 const matC2W_Three = new THREE.Matrix4().copy(F).multiply(matC2W_OpenCV).multiply(F);
+
+                const posCV = new THREE.Vector3().setFromMatrixPosition(matC2W_OpenCV);
+                const posWorld = new THREE.Vector3().setFromMatrixPosition(matC2W_Three);
+
+                if (data_received_count % 10 === 0) {
+                    debugInfoDiv.innerText = `Pos: ${posWorld.x.toFixed(2)}, ${posWorld.y.toFixed(2)}, ${posWorld.z.toFixed(2)} | CV: ${posCV.x.toFixed(2)}, ${posCV.y.toFixed(2)}, ${posCV.z.toFixed(2)}`;
+                }
 
                 cameraHelper.visible = true;
                 cameraHelper.matrixAutoUpdate = false;
                 cameraHelper.matrix.copy(matC2W_Three);
 
-                if (points.parent !== cameraHelper) {
-                    scene.remove(points);
-                    cameraHelper.add(points);
-                    // In camera space, facing -Z is Three.js convention.
-                    // But we used -depth in our loop below based on Three.js origin.
-                    // If we attach to helper, we might need to adjust or just keep it simple.
+                if (worldFixedCheckbox.checked) {
+                    if (points.parent !== scene) {
+                        cameraHelper.remove(points);
+                        scene.add(points);
+                    }
+                    // We need to transform camera-space points to world-space
+                    // Instead of transforming every point, we can just apply the matrix to the whole points object
+                    points.matrixAutoUpdate = false;
+                    points.matrix.copy(matC2W_Three);
+                } else {
+                    if (points.parent !== cameraHelper) {
+                        scene.remove(points);
+                        cameraHelper.add(points);
+                        points.position.set(0, 0, 0);
+                        points.quaternion.set(0, 0, 0, 1);
+                        points.matrixAutoUpdate = true;
+                    }
                 }
+
+                updateTrajectory();
             } else {
                 cameraHelper.visible = false;
+                trajectoryLine.visible = false;
                 if (points.parent !== scene) {
                     cameraHelper.remove(points);
                     scene.add(points);
-                    points.position.set(0, 0, 0);
-                    points.quaternion.set(0, 0, 0, 1);
                 }
+                points.position.set(0, 0, 0);
+                points.quaternion.set(0, 0, 0, 1);
+                points.matrixAutoUpdate = true;
             }
 
             if (data_received_count === 0) {
@@ -294,6 +327,34 @@
             geometry.attributes.position.needsUpdate = true;
             geometry.attributes.color.needsUpdate = true;
             geometry.computeBoundingSphere();
+        }
+
+        function updateTrajectory() {
+            if (!usePoseCheckbox.checked) return;
+            trajectoryLine.visible = true;
+
+            const trajPosAttr = trajectoryGeometry.attributes.position;
+            const trajArray = trajPosAttr.array;
+
+            let count = 0;
+            // Iterate through frames up to currentFrameIndex to build trajectory
+            for (let i = 0; i < frames.length && count < MAX_TRAJECTORY_POINTS; i++) {
+                const data = frames[i];
+                if (data.extrinsics && data.extrinsics.length === 16) {
+                    const matW2C = new THREE.Matrix4().fromArray(data.extrinsics).transpose();
+                    const matC2W_OpenCV = new THREE.Matrix4().copy(matW2C).invert();
+                    const F = new THREE.Matrix4().makeScale(1, -1, -1);
+                    const matC2W_Three = new THREE.Matrix4().copy(F).multiply(matC2W_OpenCV).multiply(F);
+
+                    const pos = new THREE.Vector3().setFromMatrixPosition(matC2W_Three);
+                    trajArray[count * 3] = pos.x;
+                    trajArray[count * 3 + 1] = pos.y;
+                    trajArray[count * 3 + 2] = pos.z;
+                    count++;
+                }
+            }
+            trajectoryLine.geometry.setDrawRange(0, count);
+            trajPosAttr.needsUpdate = true;
         }
 
         function onWindowResize() {
