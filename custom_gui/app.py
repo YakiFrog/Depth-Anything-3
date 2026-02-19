@@ -180,6 +180,7 @@ class MainWindow(QMainWindow):
             self.viewer_queue.put_nowait((rgb_frame, depth_map, extrinsics))
         except queue.Full:
             pass
+        # print("DEBUG: update_frames called")
 
     def viewer_update_worker(self):
         while True:
@@ -203,16 +204,28 @@ class MainWindow(QMainWindow):
             d_small = cv2.resize(depth, (int(w*scale), int(h*scale)))
             rgb_small = cv2.resize(rgb, (int(w*scale), int(h*scale)))
             
+            if extrinsics is not None:
+                # print(f"Sending extrinsics: {extrinsics.shape}")
+                if extrinsics.shape == (3, 4):
+                    row = np.array([[0, 0, 0, 1]])
+                    extrinsics = np.concatenate([extrinsics, row], axis=0)
+                ext_list = extrinsics.flatten().tolist()
+            else:
+                ext_list = np.eye(4).flatten().tolist()
+                
             data = {
                 "depth": d_small.flatten().tolist(),
                 "rgb": rgb_small.flatten().tolist(),
-                "extrinsics": extrinsics.tolist(),
+                "extrinsics": ext_list,
                 "width": int(w*scale),
                 "height": int(h*scale)
             }
-            requests.post("http://localhost:8000/update", json=data, timeout=0.5)
+            # print(f"DEBUG: Posting to viewer... {len(data['depth'])} points")
+            resp = requests.post("http://127.0.0.1:8000/update", json=data, timeout=1.0)
+            if resp.status_code != 200:
+                print(f"DEBUG: Viewer post failed: {resp.status_code}")
         except Exception as e:
-            print(f"Error sending to viewer: {e}")
+            print(f"DEBUG: Error sending to viewer: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

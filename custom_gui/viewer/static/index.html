@@ -4,12 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DA3 3D Viewer</title>
+    <title>DA3 3D Viewer (Simplified)</title>
     <style>
         body {
             margin: 0;
             overflow: hidden;
             background-color: #000;
+            font-family: sans-serif;
         }
 
         #info {
@@ -17,7 +18,6 @@
             top: 10px;
             left: 10px;
             color: white;
-            font-family: sans-serif;
             pointer-events: none;
         }
 
@@ -27,53 +27,34 @@
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0, 0, 0, 0.7);
-            padding: 10px;
+            padding: 15px;
             border-radius: 8px;
             display: flex;
             align-items: center;
-            gap: 10px;
-            min-width: 400px;
-            backdrop-filter: blur(5px);
-        }
-
-        #timeline {
-            flex-grow: 1;
-            cursor: pointer;
-        }
-
-        #playPauseBtn {
-            background: #fff;
-            border: none;
-            padding: 5px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-
-        #playPauseBtn:hover {
-            background: #ddd;
-        }
-
-        #frameInfo {
+            gap: 15px;
             color: white;
-            font-family: monospace;
-            min-width: 80px;
-            text-align: center;
+        }
+
+        input[type="range"] {
+            cursor: pointer;
+        }
+
+        button {
+            cursor: pointer;
+            padding: 5px 10px;
         }
     </style>
 </head>
 
 <body>
-    <div id="info">DA3 3D Point Cloud Viewer</div>
+    <div id="info">DA3 3D Point Cloud Viewer (Simplified Mode)</div>
     <div id="controls">
-        <button id="playPauseBtn">Pause</button>
-        <input type="range" id="timeline" min="0" max="0" value="0">
-        <div id="frameInfo">0 / 0</div>
-        <div style="color: white; font-family: sans-serif; font-size: 12px; margin-left: 10px;">Depth Scale:</div>
-        <input type="range" id="depthScale" min="1" max="50" value="20">
-        <div style="color: white; font-family: sans-serif; font-size: 12px; margin-left: 10px;">Follow Cam:</div>
-        <input type="checkbox" id="followCam" checked>
+        <span>Depth Scale:</span>
+        <input type="range" id="depthScale" min="1" max="100" value="20">
+        <button id="resetCamBtn">Reset Camera</button>
+        <div id="status">Waiting for data...</div>
     </div>
+
     <script type="importmap">
         {
             "imports": {
@@ -89,33 +70,20 @@
         let scene, camera, renderer, controls, points;
         let geometry, material;
         const MAX_POINTS = 100000;
+        let data_received_count = 0;
 
-        // Playback state
-        let frames = [];
-        let currentFrameIndex = -1;
-        let isPaused = false;
-        let lastFrameTime = 0;
-        const TARGET_FPS = 30;
-
-        const playPauseBtn = document.getElementById('playPauseBtn');
-        const timeline = document.getElementById('timeline');
-        const frameInfo = document.getElementById('frameInfo');
         const depthScaleSlider = document.getElementById('depthScale');
-        const followCamCheckbox = document.getElementById('followCam');
-
-        let cameraHelper;
-
-        // Keyboard state
-        const keys = {};
+        const resetCamBtn = document.getElementById('resetCamBtn');
+        const statusDiv = document.getElementById('status');
 
         init();
         setupWebSocket();
-        animate(0);
+        animate();
 
         function init() {
             scene = new THREE.Scene();
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.z = 5;
+            camera.position.set(0, 0, 5);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -129,68 +97,54 @@
             geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
             geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-            material = new THREE.PointsMaterial({ size: 0.02, vertexColors: true });
+            material = new THREE.PointsMaterial({ size: 0.1, vertexColors: true });
             points = new THREE.Points(geometry, material);
-            // We'll add points to scene, but we need to decide if they are world-space or local-space.
-            // In DA3, if we follow the camera, it's easier to keep them in scene and let the camera move.
+            // Ensure points are always rendered even if bounding box is messed up
+            points.frustumCulled = false;
             scene.add(points);
 
-            // Camera Helper (visualize predicted camera)
-            const camGeom = new THREE.BoxGeometry(0.5, 0.3, 0.4);
-            const camMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true });
-            cameraHelper = new THREE.Mesh(camGeom, camMat);
-            scene.add(cameraHelper);
+            // Debug Cube at origin
+            const cubeGeom = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+            const cubeMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+            const debugCube = new THREE.Mesh(cubeGeom, cubeMat);
+            debugCube.name = 'debugCube';
+            scene.add(debugCube);
 
             window.addEventListener('resize', onWindowResize, false);
-            window.addEventListener('keydown', (e) => keys[e.code] = true);
-            window.addEventListener('keyup', (e) => keys[e.code] = false);
-
-            // Control events
-            playPauseBtn.onclick = () => {
-                isPaused = !isPaused;
-                playPauseBtn.innerText = isPaused ? 'Play' : 'Pause';
-            };
-
-            timeline.oninput = () => {
-                const idx = parseInt(timeline.value);
-                if (idx >= 0 && idx < frames.length) {
-                    currentFrameIndex = idx;
-                    renderFrame(frames[currentFrameIndex]);
-                    updateUI();
-                }
-            };
-
-            depthScaleSlider.oninput = () => {
-                if (currentFrameIndex >= 0 && currentFrameIndex < frames.length) {
-                    renderFrame(frames[currentFrameIndex]);
-                }
+            resetCamBtn.onclick = () => {
+                camera.position.set(0, 0, 5);
+                camera.lookAt(0, 0, 0);
+                controls.reset();
             };
         }
 
         function setupWebSocket() {
-            const ws = new WebSocket(`ws://${window.location.host}/ws`);
-            ws.onmessage = (event) => {
-                // console.log("Received data via WS");
-                const data = JSON.parse(event.data);
-                frames.push(data);
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
-                if (frames.length > 2000) frames.shift();
-
-                if (!isPaused && (currentFrameIndex === frames.length - 2 || frames.length === 1)) {
-                    currentFrameIndex = frames.length - 1;
-                    renderFrame(data);
-                }
-
-                updateUI();
+            ws.onopen = () => {
+                console.log("WebSocket connected");
+                statusDiv.innerText = "Connected. Waiting for frames...";
             };
-            ws.onopen = () => console.log("WS Connected");
-            ws.onerror = (e) => console.error("WS Error", e);
-        }
 
-        function updateUI() {
-            timeline.max = Math.max(0, frames.length - 1);
-            timeline.value = currentFrameIndex;
-            frameInfo.innerText = `${currentFrameIndex + 1} / ${frames.length}`;
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    renderFrame(data);
+                    statusDiv.innerText = "Receiving data";
+                } catch (e) {
+                    console.error("Parse error:", e);
+                }
+            };
+
+            ws.onerror = (e) => {
+                console.error("WebSocket error:", e);
+                statusDiv.innerText = "WebSocket Error";
+            };
+
+            ws.onclose = () => {
+                statusDiv.innerText = "WebSocket Closed";
+            };
         }
 
         function renderFrame(data) {
@@ -198,52 +152,50 @@
             const rgb = data.rgb;
             const width = data.width;
             const height = data.height;
-            const extrinsics = data.extrinsics; // (4x4 matrix)
 
-            // Update Camera Helper / Camera Position
-            if (extrinsics) {
-                const matrix = new THREE.Matrix4().fromArray(extrinsics).transpose(); // From col-major if needed, but numpy is row-major. 
-                // Wait, Three.js is col-major. NumPy is row-major. Let's use fromArray and transpose or swap.
-                // Actually Three.js .fromArray(array) expects col-major. NumPy .tolist() is row-major.
-
-                cameraHelper.matrixAutoUpdate = false;
-                cameraHelper.matrix.copy(matrix);
-
-                if (followCamCheckbox.checked) {
-                    // Update main camera to follow the estimated pose
-                    // We might need to adjust the coordinate system (Y up vs Z up)
-                    const position = new THREE.Vector3();
-                    const quaternion = new THREE.Quaternion();
-                    const scale = new THREE.Vector3();
-                    matrix.decompose(position, quaternion, scale);
-
-                    camera.position.copy(position);
-                    camera.quaternion.copy(quaternion);
-                }
+            if (!depth || !rgb) {
+                console.error("Missing depth or rgb data");
+                return;
             }
 
-            const step = Math.max(1, Math.floor((width * height) / MAX_POINTS));
-            let count = 0;
+            if (data_received_count === 0) {
+                console.log("First Frame Data Check:");
+                console.log("- Width/Height:", width, height);
+                console.log("- Depth Length:", depth.length);
+                console.log("- RGB Length:", rgb.length);
+                const minD = Math.min(...depth.slice(0, 1000));
+                const maxD = Math.max(...depth.slice(0, 1000));
+                console.log("- Depth Range (sample):", minD, "to", maxD);
+            }
+            data_received_count++;
 
+            const positions = geometry.attributes.position.array;
+            const colors = geometry.attributes.color.array;
+
+            const step = Math.max(1, Math.floor((width * height) / MAX_POINTS));
+            const scaleFactor = parseFloat(depthScaleSlider.value) * 0.01;
+
+            let count = 0;
             for (let i = 0; i < width * height; i += step) {
                 if (count >= MAX_POINTS) break;
 
                 const x = (i % width) - width / 2;
                 const y = -(Math.floor(i / width)) + height / 2;
 
-                // Depth Reality Check: 
-                // DA3 models often output inverse depth or relative disparity.
-                // We'll apply a stronger scaling factor and allow user adjustment.
-                const scaleFactor = parseFloat(depthScaleSlider.value) * 0.1;
-                const z = -depth[i] * scaleFactor;
-
+                // Scale everything to a reasonable size
+                // x and y are in range [-width/2, width/2]
+                // We'll multiply by 0.01 to keep it in a small area
                 positions[count * 3] = x * 0.01;
                 positions[count * 3 + 1] = y * 0.01;
-                positions[count * 3 + 2] = z; // Use raw scaled Z
 
-                colors[count * 3] = rgb[i * 3] / 255;
-                colors[count * 3 + 1] = rgb[i * 3 + 1] / 255;
-                colors[count * 3 + 2] = rgb[i * 3 + 2] / 255;
+                // Flip Z for Three.js convention (-Z is forward)
+                let zVal = -depth[i] * scaleFactor;
+                if (isNaN(zVal) || !isFinite(zVal)) zVal = 0;
+                positions[count * 3 + 2] = zVal;
+
+                colors[count * 3] = (rgb[i * 3] || 0) / 255;
+                colors[count * 3 + 1] = (rgb[i * 3 + 1] || 0) / 255;
+                colors[count * 3 + 2] = (rgb[i * 3 + 2] || 0) / 255;
 
                 count++;
             }
@@ -251,6 +203,7 @@
             geometry.setDrawRange(0, count);
             geometry.attributes.position.needsUpdate = true;
             geometry.attributes.color.needsUpdate = true;
+            geometry.computeBoundingSphere();
         }
 
         function onWindowResize() {
@@ -259,31 +212,9 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
-        function updateMovement() {
-            const moveSpeed = 0.05;
-            const vector = new THREE.Vector3();
-            if (keys['KeyW']) { camera.getWorldDirection(vector); camera.position.addScaledVector(vector, moveSpeed); }
-            if (keys['KeyS']) { camera.getWorldDirection(vector); camera.position.addScaledVector(vector, -moveSpeed); }
-            if (keys['KeyA']) { camera.getWorldDirection(vector); vector.cross(camera.up); camera.position.addScaledVector(vector, -moveSpeed); }
-            if (keys['KeyD']) { camera.getWorldDirection(vector); vector.cross(camera.up); camera.position.addScaledVector(vector, moveSpeed); }
-        }
-
-        function animate(time) {
+        function animate() {
             requestAnimationFrame(animate);
-            updateMovement();
             controls.update();
-
-            if (!isPaused && frames.length > 0) {
-                const interval = 1000 / TARGET_FPS;
-                if (time - lastFrameTime > interval) {
-                    if (currentFrameIndex < frames.length - 1) {
-                        currentFrameIndex++;
-                        renderFrame(frames[currentFrameIndex]);
-                        updateUI();
-                        lastFrameTime = time;
-                    }
-                }
-            }
             renderer.render(scene, camera);
         }
     </script>
