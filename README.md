@@ -46,6 +46,27 @@ All models are trained exclusively on **public academic datasets**.
 - **25-11-2025:** Add [Awesome DA3 Projects](#-awesome-da3-projects), a community-driven section featuring DA3-based applications.
 - **14-11-2025:** Paper, project page, code and models are all released.
 
+## 🖥️ Custom GUI (Video Visualizer & 3D Viewer)
+We provide a custom GUI for real-time video processing and 3D point cloud visualization.
+
+### 📦 Prerequisites
+Ensure you have the required dependencies:
+```bash
+pip install PySide6 websockets
+```
+
+### 🚀 Usage
+1. Launch the GUI:
+   ```bash
+   python custom_gui/app.py
+   ```
+2. **Load Video**: Select an `.mp4` or `.avi` file.
+3. **Select Model**: Choose a DA3 model from the dropdown. `DA3-SMALL` is recommended for high frame rates.
+4. **Start Processing**: Real-time RGB and Depth maps will be displayed.
+5. **Open 3D Viewer**: Click the button to launch the browser-based 3D point cloud viewer (http://localhost:8000).
+   - Use **W/A/S/D** and **Mouse** to navigate.
+   - Adjust **Depth Scale** to fine-tune the 3D projection.
+
 ## ✨ Highlights
 
 ### 🏆 Model Zoo

@@ -37,8 +37,9 @@ dependencies = [
     "safetensors",
     "uvicorn",
     "moviepy==1.0.3",
-    "typer>=0.9.0",
     "pycolmap",
+    "PySide6",
+    "websockets",
 ]
 
 [project.optional-dependencies]
