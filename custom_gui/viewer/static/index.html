@@ -27,12 +27,14 @@
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0, 0, 0, 0.7);
-            padding: 15px;
+            padding: 10px 20px;
             border-radius: 8px;
             display: flex;
             align-items: center;
             gap: 15px;
             color: white;
+            font-size: 13px;
+            min-width: 600px;
         }
 
         input[type="range"] {
@@ -49,10 +51,16 @@
 <body>
     <div id="info">DA3 3D Point Cloud Viewer (Simplified Mode)</div>
     <div id="controls">
-        <span>Depth Scale:</span>
+        <button id="playPauseBtn">Pause</button>
+        <input type="range" id="timeline" min="0" max="0" value="0" style="flex-grow: 1;">
+        <div id="frameInfo">0 / 0</div>
+        <span>Depth:</span>
         <input type="range" id="depthScale" min="1" max="100" value="20">
-        <button id="resetCamBtn">Reset Camera</button>
-        <div id="status">Waiting for data...</div>
+        <span>Point Size:</span>
+        <input type="range" id="pointSize" min="1" max="50" value="10">
+        <label><input type="checkbox" id="usePose"> Use Pose</label>
+        <button id="resetCamBtn">Reset</button>
+        <div id="status">Waiting...</div>
     </div>
 
     <script type="importmap">
@@ -67,12 +75,24 @@
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-        let scene, camera, renderer, controls, points;
+        let scene, camera, renderer, controls, points, cameraHelper;
         let geometry, material;
         const MAX_POINTS = 100000;
         let data_received_count = 0;
 
+        // Playback state
+        let frames = [];
+        let currentFrameIndex = -1;
+        let isPaused = false;
+        let lastFrameTime = 0;
+        const TARGET_FPS = 30;
+
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        const timeline = document.getElementById('timeline');
+        const frameInfo = document.getElementById('frameInfo');
         const depthScaleSlider = document.getElementById('depthScale');
+        const pointSizeSlider = document.getElementById('pointSize');
+        const usePoseCheckbox = document.getElementById('usePose');
         const resetCamBtn = document.getElementById('resetCamBtn');
         const statusDiv = document.getElementById('status');
 
@@ -91,6 +111,10 @@
 
             controls = new OrbitControls(camera, renderer.domElement);
 
+            // World Axes Helper (Red: X, Green: Y, Blue: Z)
+            const worldAxes = new THREE.AxesHelper(5);
+            scene.add(worldAxes);
+
             geometry = new THREE.BufferGeometry();
             const positions = new Float32Array(MAX_POINTS * 3);
             const colors = new Float32Array(MAX_POINTS * 3);
@@ -103,19 +127,49 @@
             points.frustumCulled = false;
             scene.add(points);
 
-            // Debug Cube at origin
-            const cubeGeom = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-            const cubeMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
-            const debugCube = new THREE.Mesh(cubeGeom, cubeMat);
-            debugCube.name = 'debugCube';
-            scene.add(debugCube);
+            // Camera Helper (visualize predicted camera)
+            const camGeom = new THREE.BoxGeometry(0.5, 0.3, 0.4);
+            const camMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true });
+            cameraHelper = new THREE.Mesh(camGeom, camMat);
+            cameraHelper.visible = false;
+
+            // Camera local axes
+            const camAxes = new THREE.AxesHelper(1);
+            cameraHelper.add(camAxes);
+
+            scene.add(cameraHelper);
 
             window.addEventListener('resize', onWindowResize, false);
+
+            pointSizeSlider.oninput = () => {
+                material.size = parseFloat(pointSizeSlider.value) * 0.01;
+            };
+
+            playPauseBtn.onclick = () => {
+                isPaused = !isPaused;
+                playPauseBtn.innerText = isPaused ? 'Play' : 'Pause';
+            };
+
+            timeline.oninput = () => {
+                const idx = parseInt(timeline.value);
+                if (idx >= 0 && idx < frames.length) {
+                    currentFrameIndex = idx;
+                    renderFrame(frames[currentFrameIndex]);
+                    updateUI();
+                }
+            };
+
             resetCamBtn.onclick = () => {
                 camera.position.set(0, 0, 5);
                 camera.lookAt(0, 0, 0);
                 controls.reset();
             };
+        }
+
+        function updateUI() {
+            timeline.max = Math.max(0, frames.length - 1);
+            timeline.value = currentFrameIndex;
+            frameInfo.innerText = `${currentFrameIndex + 1} / ${frames.length}`;
         }
 
         function setupWebSocket() {
@@ -130,7 +184,17 @@
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    renderFrame(data);
+                    frames.push(data);
+                    // Keep buffer manageable (e.g., 2000 frames)
+                    if (frames.length > 2000) frames.shift();
+
+                    // If not paused, and we were at the end or it's the first frame, advance
+                    if (!isPaused && (currentFrameIndex === frames.length - 2 || frames.length === 1)) {
+                        currentFrameIndex = frames.length - 1;
+                        renderFrame(data);
+                    }
+
+                    updateUI();
                     statusDiv.innerText = "Receiving data";
                 } catch (e) {
                     console.error("Parse error:", e);
@@ -152,10 +216,39 @@
             const rgb = data.rgb;
             const width = data.width;
             const height = data.height;
+            const extrinsics = data.extrinsics;
 
-            if (!depth || !rgb) {
-                console.error("Missing depth or rgb data");
-                return;
+            if (!depth || !rgb) return;
+
+            // Handle Pose
+            if (extrinsics && extrinsics.length === 16 && usePoseCheckbox.checked) {
+                const matW2C = new THREE.Matrix4().fromArray(extrinsics).transpose();
+                const matC2W_OpenCV = new THREE.Matrix4().copy(matW2C).invert();
+
+                // Correct conversion from OpenCV C2W to Three.js C2W
+                // Let F = diag(1, -1, -1). Then M_three = F * M_cv * F
+                const F = new THREE.Matrix4().makeScale(1, -1, -1);
+                const matC2W_Three = new THREE.Matrix4().copy(F).multiply(matC2W_OpenCV).multiply(F);
+
+                cameraHelper.visible = true;
+                cameraHelper.matrixAutoUpdate = false;
+                cameraHelper.matrix.copy(matC2W_Three);
+
+                if (points.parent !== cameraHelper) {
+                    scene.remove(points);
+                    cameraHelper.add(points);
+                    // In camera space, facing -Z is Three.js convention.
+                    // But we used -depth in our loop below based on Three.js origin.
+                    // If we attach to helper, we might need to adjust or just keep it simple.
+                }
+            } else {
+                cameraHelper.visible = false;
+                if (points.parent !== scene) {
+                    cameraHelper.remove(points);
+                    scene.add(points);
+                    points.position.set(0, 0, 0);
+                    points.quaternion.set(0, 0, 0, 1);
+                }
             }
 
             if (data_received_count === 0) {
@@ -163,9 +256,6 @@
                 console.log("- Width/Height:", width, height);
                 console.log("- Depth Length:", depth.length);
                 console.log("- RGB Length:", rgb.length);
-                const minD = Math.min(...depth.slice(0, 1000));
-                const maxD = Math.max(...depth.slice(0, 1000));
-                console.log("- Depth Range (sample):", minD, "to", maxD);
             }
             data_received_count++;
 
@@ -212,9 +302,22 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
-        function animate() {
+        function animate(time) {
             requestAnimationFrame(animate);
             controls.update();
+
+            if (!isPaused && frames.length > 0) {
+                const interval = 1000 / TARGET_FPS;
+                if (time - lastFrameTime > interval) {
+                    if (currentFrameIndex < frames.length - 1) {
+                        currentFrameIndex++;
+                        renderFrame(frames[currentFrameIndex]);
+                        updateUI();
+                        lastFrameTime = time;
+                    }
+                }
+            }
+
             renderer.render(scene, camera);
         }
     </script>
