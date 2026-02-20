@@ -17,7 +17,7 @@ Model:
 
   ref_view_strategy: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
   ref_view_strategy_loop: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
-  depth_threshold: 15.0
+  depth_threshold: 30.0
 
   save_depth_conf_result: True
   save_debug_info: False
@@ -32,8 +32,8 @@ Model:
     tol: 1e-9
 
   Pointcloud_Save:
-    sample_ratio: 0.015
-    conf_threshold_coef: 0.75 # conf_threshold = np.mean(confs) * conf_threshold_coef
+    sample_ratio: 0.05
+    conf_threshold_coef: 0.00 # conf_threshold = np.mean(confs) * conf_threshold_coef
 
 Loop:
   SALAD:

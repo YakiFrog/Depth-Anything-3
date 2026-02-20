@@ -1240,7 +1240,7 @@ def weighted_align_point_maps(
             align_method=config["Model"]["align_method"],
         )
     elif config["Model"]["align_lib"] == "torch":  # torch
-        s, R, t = robust_weighted_estimate_sim3_torch(
+        s, R, t, residual = robust_weighted_estimate_sim3_torch(
             all_pts2,
             all_pts1,
             all_weights,
@@ -1251,7 +1251,8 @@ def weighted_align_point_maps(
         )
     elif config["Model"]["align_lib"] == "triton":  # triton
         if robust_weighted_estimate_sim3_triton is not None:
-            s, R, t = robust_weighted_estimate_sim3_triton(
+            # Note: triton version might not return residual yet, safely handle it
+            res = robust_weighted_estimate_sim3_triton(
                 all_pts2,
                 all_pts1,
                 all_weights,
@@ -1260,9 +1261,14 @@ def weighted_align_point_maps(
                 tol=eval(config["Model"]["IRLS"]["tol"]),
                 align_method=config["Model"]["align_method"],
             )
+            if len(res) == 4:
+                s, R, t, residual = res
+            else:
+                s, R, t = res
+                residual = 0.0
         else:
             print("[INFO] Triton is not available. Falling back to torch.")
-            s, R, t = robust_weighted_estimate_sim3_torch(
+            s, R, t, residual = robust_weighted_estimate_sim3_torch(
                 all_pts2,
                 all_pts1,
                 all_weights,
@@ -1283,4 +1289,4 @@ def weighted_align_point_maps(
     )
     print(f"Mean error: {mean_error}")
 
-    return s, R, t
+    return s, R, t, residual
