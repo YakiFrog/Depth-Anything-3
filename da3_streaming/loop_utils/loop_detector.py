@@ -138,7 +138,7 @@ class LoopDetector:
             },
         )
 
-        model.load_state_dict(torch.load(self.ckpt_path))
+        model.load_state_dict(torch.load(self.ckpt_path, map_location='cpu'))
         model = model.eval()
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -162,6 +162,9 @@ class LoopDetector:
             image_paths.extend(list(Path(self.image_dir).glob(f"*{ext}")))
             image_paths.extend(list(Path(self.image_dir).glob(f"*{ext.upper()}")))
 
+        # Filter out macOS hidden files
+        image_paths = [p for p in image_paths if not p.name.startswith("._")]
+        
         image_paths = sorted(image_paths)
         self.image_paths = image_paths
         return image_paths
@@ -250,14 +253,26 @@ class LoopDetector:
             self.extract_descriptors()
 
         embed_size = self.descriptors.shape[1]
-        faiss_index = faiss.IndexFlatIP(embed_size)
-
-        normalized_descriptors = self.descriptors.numpy()
-        faiss_index.add(normalized_descriptors)
-
-        similarities, indices = faiss_index.search(
-            normalized_descriptors, self.top_k + 1
-        )  # +1 because self is most similar
+        
+        # FIX MacOS Segmentation Fault in FAISS by limiting OpenMP threads
+        import os
+        old_omp = os.environ.get("OMP_NUM_THREADS")
+        os.environ["OMP_NUM_THREADS"] = "1"
+        
+        try:
+            faiss_index = faiss.IndexFlatIP(embed_size)
+    
+            normalized_descriptors = self.descriptors.numpy()
+            faiss_index.add(normalized_descriptors)
+    
+            similarities, indices = faiss_index.search(
+                normalized_descriptors, self.top_k + 1
+            )  # +1 because self is most similar
+        finally:
+            if old_omp is not None:
+                os.environ["OMP_NUM_THREADS"] = old_omp
+            else:
+                del os.environ["OMP_NUM_THREADS"]
 
         loop_closures = []
         for i in range(len(self.descriptors)):

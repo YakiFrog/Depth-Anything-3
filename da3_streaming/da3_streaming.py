@@ -257,7 +257,7 @@ class DA3_Streaming:
                 )
         print("")
 
-    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False):
+    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False, preview_callback=None):
         start_idx, end_idx = range_1
         chunk_image_paths = self.img_list[start_idx:end_idx]
         if range_2 is not None:
@@ -287,6 +287,17 @@ class DA3_Streaming:
                 print(predictions.conf.shape)  # [N, H, W] float32
                 print(predictions.extrinsics.shape)  # [N, 3, 4] float32 (w2c)
                 print(predictions.intrinsics.shape)  # [N, 3, 3] float32
+
+                # Preview the last frame of the chunk if requested
+                if preview_callback is not None and not is_loop:
+                    import cv2
+                    d = predictions.depth[-1]
+                    d_vis = d.max() - d
+                    d_norm = cv2.normalize(d_vis, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
+                    preview_rgb = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)
+                    preview_callback(preview_rgb)
+
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
         # Save predictions to disk instead of keeping in memory
@@ -527,7 +538,7 @@ class DA3_Streaming:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
 
-    def process_long_sequence(self):
+    def process_long_sequence(self, progress_callback=None, preview_callback=None):
         if self.overlap >= self.chunk_size:
             raise ValueError(
                 f"[SETTING ERROR] Overlap ({self.overlap}) \
@@ -544,8 +555,11 @@ class DA3_Streaming:
         pre_predictions = None
         for chunk_idx in range(len(self.chunk_indices)):
             print(f"[Progress]: {chunk_idx}/{len(self.chunk_indices)}")
+            if progress_callback:
+                progress_callback(chunk_idx * self.chunk_size, len(self.img_list),
+                                 f"Inferencing Chunk {chunk_idx+1}/{len(self.chunk_indices)}")
             cur_predictions = self.process_single_chunk(
-                self.chunk_indices[chunk_idx], chunk_idx=chunk_idx
+                self.chunk_indices[chunk_idx], chunk_idx=chunk_idx, preview_callback=preview_callback
             )
             if torch.cuda.is_available(): torch.cuda.empty_cache()
 
@@ -630,6 +644,8 @@ class DA3_Streaming:
                 input_abs_poses, optimized_abs_poses, save_name="sim3_opt_result.png"
             )
 
+        if progress_callback:
+            progress_callback(len(self.img_list), len(self.img_list), "Aligning Point Clouds & Poses")
         print("Apply alignment")
         self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
         for chunk_idx in range(len(self.chunk_indices) - 1):
@@ -705,7 +721,7 @@ class DA3_Streaming:
 
         print("Done.")
 
-    def run(self):
+    def run(self, progress_callback=None, preview_callback=None):
         print(f"Loading images from {self.img_dir}...")
         self.img_list = sorted(
             glob.glob(os.path.join(self.img_dir, "*.jpg"))
@@ -716,7 +732,7 @@ class DA3_Streaming:
             raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
         print(f"Found {len(self.img_list)} images")
 
-        self.process_long_sequence()
+        self.process_long_sequence(progress_callback, preview_callback)
 
     def save_camera_poses(self):
         """
