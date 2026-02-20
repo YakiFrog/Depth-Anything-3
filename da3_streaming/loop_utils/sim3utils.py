@@ -1240,15 +1240,27 @@ def weighted_align_point_maps(
             align_method=config["Model"]["align_method"],
         )
     elif config["Model"]["align_lib"] == "triton":  # triton
-        s, R, t = robust_weighted_estimate_sim3_triton(
-            all_pts2,
-            all_pts1,
-            all_weights,
-            delta=config["Model"]["IRLS"]["delta"],
-            max_iters=config["Model"]["IRLS"]["max_iters"],
-            tol=eval(config["Model"]["IRLS"]["tol"]),
-            align_method=config["Model"]["align_method"],
-        )
+        if robust_weighted_estimate_sim3_triton is not None:
+            s, R, t = robust_weighted_estimate_sim3_triton(
+                all_pts2,
+                all_pts1,
+                all_weights,
+                delta=config["Model"]["IRLS"]["delta"],
+                max_iters=config["Model"]["IRLS"]["max_iters"],
+                tol=eval(config["Model"]["IRLS"]["tol"]),
+                align_method=config["Model"]["align_method"],
+            )
+        else:
+            print("[INFO] Triton is not available. Falling back to torch.")
+            s, R, t = robust_weighted_estimate_sim3_torch(
+                all_pts2,
+                all_pts1,
+                all_weights,
+                delta=config["Model"]["IRLS"]["delta"],
+                max_iters=config["Model"]["IRLS"]["max_iters"],
+                tol=eval(config["Model"]["IRLS"]["tol"]),
+                align_method=config["Model"]["align_method"],
+            )
     else:
         raise ValueError(f"Unknown align_lib: {config['Model']['align_lib']}")
 

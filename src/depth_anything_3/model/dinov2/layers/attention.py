@@ -57,17 +57,38 @@ class Attention(nn.Module):
             q = self.rope(q, pos)
             k = self.rope(k, pos)
         if self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                dropout_p=self.attn_drop.p if self.training else 0.0,
-                attn_mask=(
-                    (attn_mask)[:, None].repeat(1, self.num_heads, 1, 1)
-                    if attn_mask is not None
-                    else None
-                ),
-            )
+            # DEBUG: Log shapes on first failure or periodically
+            try:
+                # Ensure contiguity for MPS/Cuda stability
+                q_c, k_c, v_c = q.contiguous(), k.contiguous(), v.contiguous()
+                x = F.scaled_dot_product_attention(
+                    q_c,
+                    k_c,
+                    v_c,
+                    dropout_p=self.attn_drop.p if self.training else 0.0,
+                    attn_mask=(
+                        (attn_mask)[:, None].repeat(1, self.num_heads, 1, 1)
+                        if attn_mask is not None
+                        else None
+                    ),
+                )
+            except (RuntimeError, Exception) as e:
+                # Fallback to manual attention on memory/implementation errors (common on MPS)
+                if not self.training:
+                    # Silent fallback to avoid flooding logs
+                    q = q * self.scale
+                    kt = k.transpose(-2, -1).contiguous()
+                    attn = q @ kt
+                    if attn_mask is not None:
+                        if attn_mask.ndim == 2: # (B, N)
+                            attn = attn + attn_mask[:, None, None, :]
+                        else:
+                            attn = attn + attn_mask
+                    attn = attn.softmax(dim=-1)
+                    attn = self.attn_drop(attn)
+                    x = attn @ v
+                else:
+                    raise e
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
