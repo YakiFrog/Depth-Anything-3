@@ -731,7 +731,12 @@ def robust_weighted_estimate_sim3(
         s, R, t = s_new, R_new, t_new
         prev_error = current_error
 
-    return s, R, t
+    # Final residual calculation
+    final_transformed = s * (src @ R.T) + t
+    final_residuals = np.linalg.norm(tgt - final_transformed, axis=1)
+    final_mean_resid = float(np.mean(final_residuals))
+
+    return s, R, t, final_mean_resid
 
 
 # ===== Speed Up Begin =====
@@ -906,7 +911,12 @@ def robust_weighted_estimate_sim3_numba(
         s, R, t = s_new, R_new, t_new
         prev_error = current_error
 
-    return s, R, t
+    # Final residual calculation
+    final_transformed = apply_transformation_numba(src, s, R, t)
+    final_residuals = compute_residuals_numba(tgt, final_transformed)
+    final_mean_resid = float(np.mean(final_residuals))
+
+    return s, R, t, final_mean_resid
 
 
 def warmup_numba():
@@ -1210,7 +1220,7 @@ def weighted_align_point_maps(
     print(f"The number of corresponding points matched: {all_pts1.shape[0]}")
 
     if config["Model"]["align_lib"] == "numba":
-        s, R, t = robust_weighted_estimate_sim3_numba(
+        s, R, t, residual = robust_weighted_estimate_sim3_numba(
             all_pts2,
             all_pts1,
             all_weights,
@@ -1220,7 +1230,7 @@ def weighted_align_point_maps(
             align_method=config["Model"]["align_method"],
         )
     elif config["Model"]["align_lib"] == "numpy":  # numpy
-        s, R, t = robust_weighted_estimate_sim3(
+        s, R, t, residual = robust_weighted_estimate_sim3(
             all_pts2,
             all_pts1,
             all_weights,

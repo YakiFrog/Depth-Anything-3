@@ -39,10 +39,14 @@ Loop:
   SALAD:
     image_size: [336, 336]
     batch_size: 32
-    similarity_threshold: 0.85 # ループ検出のしきい値。低いほど見つかりやすいが誤検知も増える。元は0.85
+    similarity_threshold: 0.85 # ループ検出のしきい値。低いほど見つかりやすいが誤検知も増える。
     top_k: 5 # 各フレームに対して検索する近傍候補数
     use_nms: True # 非最大値抑制を使い、連続するフレームでの重複検知を防ぐ
     nms_threshold: 25 # ループ判定から除外する近接フレーム数（時間的距離）
+    min_sequence_len: 3 # 連続してマッチしたフレーム数。これ未満の単発マッチは除外する。推奨: 3-5
+    residual_threshold: 0.5 # 幾何学的許容誤差（しきい値）。これを超えると誤ループとして破棄する。
+
+
 
   SIM3_Optimizer:
     lang_version: 'cpp'

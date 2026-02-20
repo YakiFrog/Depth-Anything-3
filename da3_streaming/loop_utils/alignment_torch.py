@@ -205,7 +205,12 @@ def robust_weighted_estimate_sim3_torch(
         s, R, t = s_new, R_new, t_new
         prev_error = current_error
 
-    return s, R, t
+    # Final residual calculation
+    final_transformed = apply_transformation_torch(src, s, R, t)
+    final_residuals = compute_residuals_torch(tgt, final_transformed)
+    final_mean_resid = float(np.mean(final_residuals))
+
+    return s, R, t, final_mean_resid
 
 
 def apply_sim3_direct_torch(point_maps, s, R, t, device=None):

@@ -97,6 +97,7 @@ class LoopDetector:
         self.top_k = self.config["Loop"]["SALAD"]["top_k"]
         self.use_nms = self.config["Loop"]["SALAD"]["use_nms"]
         self.nms_threshold = self.config["Loop"]["SALAD"]["nms_threshold"]
+        self.min_sequence_len = self.config["Loop"]["SALAD"].get("min_sequence_len", 3)
         self.output = output
 
         self.model = None
@@ -213,6 +214,8 @@ class LoopDetector:
         self.descriptors = torch.cat(descriptors)
         return self.descriptors
 
+        return filtered_loops
+
     def _apply_nms_filter(self, loop_closures, nms_threshold):
         """Apply Non-Maximum Suppression (NMS) filtering to loop pairs"""
         if not loop_closures or nms_threshold <= 0:
@@ -243,6 +246,41 @@ class LoopDetector:
             suppressed.update(suppress_range)
 
         return filtered_loops
+
+    def _apply_sequence_filter(self, loop_closures, min_len):
+        """Apply sequential consistency filtering to loop closures"""
+        if not loop_closures or min_len <= 1:
+            return loop_closures
+
+        # Create a set for fast lookup of candidate pairs
+        candidates = set((i, j) for i, j, _ in loop_closures)
+        verified_loops = []
+
+        for i, j, sim in loop_closures:
+            count = 1
+            # Check for local temporal consistency: (i+k, j+k) or (i+k, j-k) etc.
+            # Usually, if it's a loop, i and j move in the same or opposite direction.
+            
+            # Same direction: (i+k, j+k)
+            forward_count = 1
+            for k in range(1, min_len):
+                if (i + k, j + k) in candidates or (j + k, i + k) in candidates:
+                    forward_count += 1
+                elif (i - k, j - k) in candidates or (j - k, i - k) in candidates:
+                    forward_count += 1
+            
+            # Opposite direction (e.g. U-turn): (i+k, j-k)
+            backward_count = 1
+            for k in range(1, min_len):
+                if (i + k, j - k) in candidates or (j - k, i + k) in candidates:
+                    backward_count += 1
+                elif (i - k, j + k) in candidates or (j + k, i - k) in candidates:
+                    backward_count += 1
+            
+            if max(forward_count, backward_count) >= min_len:
+                verified_loops.append((i, j, sim))
+        
+        return verified_loops
 
     def _ensure_decending_order(self, tuples_list):
         return [(max(a, b), min(a, b), score) for a, b, score in tuples_list]
@@ -289,6 +327,9 @@ class LoopDetector:
 
         loop_closures = list(set(loop_closures))
         loop_closures.sort(key=lambda x: x[2], reverse=True)
+
+        if self.min_sequence_len > 1:
+            loop_closures = self._apply_sequence_filter(loop_closures, self.min_sequence_len)
 
         if self.use_nms and self.nms_threshold > 0:
             loop_closures = self._apply_nms_filter(loop_closures, self.nms_threshold)
