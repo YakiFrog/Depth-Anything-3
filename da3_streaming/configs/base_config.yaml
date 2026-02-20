@@ -4,16 +4,16 @@ Weights:
   SALAD: './weights/dino_salad.ckpt'
 
 Model:
-  chunk_size: 120
-  overlap: 60
-  loop_chunk_size: 20 # imgs of loop chunk = 2 * loop_chunk_size
-  loop_enable: True
+  chunk_size: 120    # 処理するチャンクのフレーム数
+  overlap: 60       # チャンク間のオーバーラップ（接続用）
+  loop_chunk_size: 20 # ループ検出時のチャンクサイズ
+  loop_enable: True   # ループクロージャ（軌跡補正）を有効にするか
   useDBoW: False
   delete_temp_files: True
-  align_lib: 'triton' # choose among 'triton' (GPU), 'torch' (GPU), 'numba' (CPU) or 'numpy' (CPU)
-  align_method: 'sim3' # choose among 'sim3', 'se3' or 'scale+se3'
-  scale_compute_method: 'auto' # choose among 'auto', 'ransac' or 'weighted'. It is used when align_method == 'scale+se3'
-  align_type: 'dense' # choose between 'dense' or 'sparse'. Sparse align is constructing, not avaible for now
+  align_lib: 'triton' # アライメント用のライブラリ (triton/torch/numba/numpy)
+  align_method: 'sim3' # 補正手法 (sim3: スケール込み回転移動)
+  scale_compute_method: 'auto'
+  align_type: 'dense'
 
   ref_view_strategy: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
   ref_view_strategy_loop: 'saddle_balanced' # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
@@ -39,10 +39,10 @@ Loop:
   SALAD:
     image_size: [336, 336]
     batch_size: 32
-    similarity_threshold: 0.85
-    top_k: 5
-    use_nms: True
-    nms_threshold: 25
+    similarity_threshold: 0.85 # ループ検出のしきい値。低いほど見つかりやすいが誤検知も増える。元は0.85
+    top_k: 5 # 各フレームに対して検索する近傍候補数
+    use_nms: True # 非最大値抑制を使い、連続するフレームでの重複検知を防ぐ
+    nms_threshold: 25 # ループ判定から除外する近接フレーム数（時間的距離）
 
   SIM3_Optimizer:
     lang_version: 'cpp'
