@@ -255,9 +255,39 @@ class DA3_Streaming:
                 np.savez_compressed(
                     filepath, image=image, depth=depth, conf=conf, intrinsics=intrinsics
                 )
+            
+            # Save GS data if available
+            if hasattr(predictions, "gaussians") and predictions.gaussians is not None:
+                gs_dir = os.path.join(self.output_dir, "gs_data")
+                os.makedirs(gs_dir, exist_ok=True)
+                gs_path = os.path.join(gs_dir, f"{global_idx:06d}.pt")
+                
+                # Each frame's GS data needs to be extracted from the concatenated result
+                # Based on gsply_helpers: points are flattened as (V H W)
+                # But here we might have multiple frames in predictions.gaussians.
+                # However, DA3_Streaming might call inference per chunk.
+                # If N is frames in prediction:
+                N, H, W = predictions.depth.shape
+                # gaussians.means is (1, N*H*W, 3)
+                gs = predictions.gaussians
+                
+                # Simplified: Save a Slice of the gaussians for this frame
+                pts_per_frame = H * W
+                start_pt = local_idx * pts_per_frame
+                end_pt = (local_idx + 1) * pts_per_frame
+                
+                frame_gs = {
+                    "means": gs.means[:, start_pt:end_pt].cpu(),
+                    "scales": gs.scales[:, start_pt:end_pt].cpu(),
+                    "rotations": gs.rotations[:, start_pt:end_pt].cpu(),
+                    "harmonics": gs.harmonics[:, start_pt:end_pt].cpu(),
+                    "opacities": gs.opacities[:, start_pt:end_pt].cpu(),
+                }
+                torch.save(frame_gs, gs_path)
+
         print("")
 
-    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False, preview_callback=None):
+    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False, preview_callback=None, infer_gs=False):
         start_idx, end_idx = range_1
         chunk_image_paths = self.img_list[start_idx:end_idx]
         if range_2 is not None:
@@ -267,17 +297,52 @@ class DA3_Streaming:
         # images = load_and_preprocess_images(chunk_image_paths).to(self.device)
         print(f"Loaded {len(chunk_image_paths)} images")
 
+        if is_loop:
+            save_dir = self.result_loop_dir
+            filename = f"loop_{range_1[0]}_{range_1[1]}_{range_2[0]}_{range_2[1]}.npy"
+        else:
+            if chunk_idx is None:
+                raise ValueError("chunk_idx must be provided when is_loop is False")
+            save_dir = self.result_unaligned_dir
+            filename = f"chunk_{chunk_idx}.npy"
+
+        save_path = os.path.join(save_dir, filename)
+
+        # Skip inference if cached result exists
+        if os.path.exists(save_path):
+            print(f"Loading cached inference from {save_path}")
+            predictions = np.load(save_path, allow_pickle=True).item()
+            if not is_loop and range_2 is None:
+                extrinsics = predictions.extrinsics
+                intrinsics = predictions.intrinsics
+                chunk_range = self.chunk_indices[chunk_idx]
+                self.all_camera_poses.append((chunk_range, extrinsics))
+                self.all_camera_intrinsics.append((chunk_range, intrinsics))
+            
+            # Preview the last frame even if loading from cache
+            if preview_callback is not None and not is_loop:
+                import cv2
+                d = predictions.depth[-1]
+                d_vis = d.max() - d
+                d_norm = cv2.normalize(d_vis, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
+                preview_rgb = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)
+                preview_callback(preview_rgb)
+            
+            return predictions
+
         ref_view_strategy = self.config["Model"][
             "ref_view_strategy" if not is_loop else "ref_view_strategy_loop"
         ]
 
         if torch.cuda.is_available(): torch.cuda.empty_cache()
+        if torch.backends.mps.is_available(): torch.mps.empty_cache()
         with torch.no_grad():
             with torch.autocast(device_type=self.device, dtype=self.dtype):
                 images = chunk_image_paths
                 # images: ['xxx.png', 'xxx.png', ...]
 
-                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
+                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy, infer_gs=infer_gs)
 
                 predictions.depth = np.squeeze(predictions.depth)
                 predictions.conf -= 1.0
@@ -299,6 +364,7 @@ class DA3_Streaming:
                     preview_callback(preview_rgb)
 
         if torch.cuda.is_available(): torch.cuda.empty_cache()
+        if torch.backends.mps.is_available(): torch.mps.empty_cache()
 
         # Save predictions to disk instead of keeping in memory
         if is_loop:
@@ -546,7 +612,7 @@ class DA3_Streaming:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
 
-    def process_long_sequence(self, progress_callback=None, preview_callback=None):
+    def process_long_sequence(self, progress_callback=None, preview_callback=None, infer_gs=False):
         if self.overlap >= self.chunk_size:
             raise ValueError(
                 f"[SETTING ERROR] Overlap ({self.overlap}) \
@@ -567,9 +633,10 @@ class DA3_Streaming:
                 progress_callback(chunk_idx * self.chunk_size, len(self.img_list),
                                  f"Inferencing Chunk {chunk_idx+1}/{len(self.chunk_indices)}")
             cur_predictions = self.process_single_chunk(
-                self.chunk_indices[chunk_idx], chunk_idx=chunk_idx, preview_callback=preview_callback
+                self.chunk_indices[chunk_idx], chunk_idx=chunk_idx, preview_callback=preview_callback, infer_gs=infer_gs
             )
             if torch.cuda.is_available(): torch.cuda.empty_cache()
+            if torch.backends.mps.is_available(): torch.mps.empty_cache()
 
             if chunk_idx > 0:
                 print(
@@ -620,6 +687,7 @@ class DA3_Streaming:
             del self.loop_detector  # Save GPU Memory
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
+            if torch.backends.mps.is_available(): torch.mps.empty_cache()
 
             print("Loop SIM(3) estimating...")
             loop_results = process_loop_list(
@@ -692,12 +760,13 @@ class DA3_Streaming:
                 )
                 colors_first = chunk_data_first.processed_images
                 confs_first = chunk_data_first.conf
-                ply_path_first = os.path.join(self.pcd_dir, "0_pcd.ply")
+                ply_path = os.path.join(self.pcd_dir, "0_pcd.ply")
+                print(f"Saving chunk 0 PCD with threshold {np.mean(confs_first) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef']:.4f}")
                 save_confident_pointcloud_batch(
                     points=points_first,  # shape: (H, W, 3)
                     colors=colors_first,  # shape: (H, W, 3)
                     confs=confs_first,  # shape: (H, W)
-                    output_path=ply_path_first,
+                    output_path=ply_path,
                     conf_threshold=np.mean(confs_first)
                     * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
                     sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
@@ -710,6 +779,7 @@ class DA3_Streaming:
             colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
             confs = aligned_chunk_data["conf"].reshape(-1)
             ply_path = os.path.join(self.pcd_dir, f"{chunk_idx+1}_pcd.ply")
+            print(f"Saving chunk {chunk_idx+1} PCD with threshold {np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef']:.4f}")
             save_confident_pointcloud_batch(
                 points=points,  # shape: (H, W, 3)
                 colors=colors,  # shape: (H, W, 3)
@@ -729,7 +799,7 @@ class DA3_Streaming:
 
         print("Done.")
 
-    def run(self, progress_callback=None, preview_callback=None):
+    def run(self, progress_callback=None, preview_callback=None, infer_gs=False):
         print(f"Loading images from {self.img_dir}...")
         self.img_list = sorted(
             glob.glob(os.path.join(self.img_dir, "*.jpg"))
@@ -740,7 +810,7 @@ class DA3_Streaming:
             raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
         print(f"Found {len(self.img_list)} images")
 
-        self.process_long_sequence(progress_callback, preview_callback)
+        self.process_long_sequence(progress_callback, preview_callback, infer_gs=infer_gs)
 
     def save_camera_poses(self):
         """
