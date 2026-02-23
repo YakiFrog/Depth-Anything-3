@@ -97,6 +97,7 @@ class LoopDetector:
         self.top_k = self.config["Loop"]["SALAD"]["top_k"]
         self.use_nms = self.config["Loop"]["SALAD"]["use_nms"]
         self.nms_threshold = self.config["Loop"]["SALAD"]["nms_threshold"]
+        self.min_loop_distance = self.config["Loop"]["SALAD"]["min_loop_distance"]
         self.output = output
 
         self.model = None
@@ -281,7 +282,7 @@ class LoopDetector:
                 neighbor_idx = indices[i, j]
                 similarity = similarities[i, j]
 
-                if similarity > self.similarity_threshold and abs(i - neighbor_idx) > 10:
+                if similarity > self.similarity_threshold and abs(i - neighbor_idx) > self.min_loop_distance:
                     if i < neighbor_idx:
                         loop_closures.append((i, neighbor_idx, similarity))
                     else:
