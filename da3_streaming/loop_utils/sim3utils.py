@@ -558,6 +558,8 @@ def merge_ply_files(input_dir, output_path):
     print("Merging PLY files...")
 
     input_files = sorted(glob.glob(os.path.join(input_dir, "*_pcd.ply")))
+    # Exclude output file if it matches the pattern
+    input_files = [f for f in input_files if os.path.abspath(f) != os.path.abspath(output_path)]
 
     if not input_files:
         print("No PLY files found")
@@ -1230,7 +1232,7 @@ def weighted_align_point_maps(
             align_method=config["Model"]["align_method"],
         )
     elif config["Model"]["align_lib"] == "torch":  # torch
-        s, R, t, residual = robust_weighted_estimate_sim3_torch(
+        s, R, t = robust_weighted_estimate_sim3_torch(
             all_pts2,
             all_pts1,
             all_weights,
@@ -1241,8 +1243,7 @@ def weighted_align_point_maps(
         )
     elif config["Model"]["align_lib"] == "triton":  # triton
         if robust_weighted_estimate_sim3_triton is not None:
-            # Note: triton version might not return residual yet, safely handle it
-            res = robust_weighted_estimate_sim3_triton(
+            s, R, t = robust_weighted_estimate_sim3_triton(
                 all_pts2,
                 all_pts1,
                 all_weights,
@@ -1251,14 +1252,9 @@ def weighted_align_point_maps(
                 tol=eval(config["Model"]["IRLS"]["tol"]),
                 align_method=config["Model"]["align_method"],
             )
-            if len(res) == 4:
-                s, R, t, residual = res
-            else:
-                s, R, t = res
-                residual = 0.0
         else:
             print("[INFO] Triton is not available. Falling back to torch.")
-            s, R, t, residual = robust_weighted_estimate_sim3_torch(
+            s, R, t = robust_weighted_estimate_sim3_torch(
                 all_pts2,
                 all_pts1,
                 all_weights,
@@ -1279,4 +1275,4 @@ def weighted_align_point_maps(
     )
     print(f"Mean error: {mean_error}")
 
-    return s, R, t, residual
+    return s, R, t

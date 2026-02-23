@@ -338,30 +338,38 @@ class DA3_Streaming:
         if torch.cuda.is_available(): torch.cuda.empty_cache()
         if torch.backends.mps.is_available(): torch.mps.empty_cache()
         with torch.no_grad():
-            with torch.autocast(device_type=self.device, dtype=self.dtype):
-                images = chunk_image_paths
-                # images: ['xxx.png', 'xxx.png', ...]
+            images = chunk_image_paths
+            # images: ['xxx.png', 'xxx.png', ...]
 
-                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy, infer_gs=infer_gs)
+            process_res = self.config["Model"].get("process_res", 504)
+            process_res_method = self.config["Model"].get("process_res_method", "upper_bound_resize")
+            
+            predictions = self.model.inference(
+                images, 
+                ref_view_strategy=ref_view_strategy, 
+                infer_gs=infer_gs,
+                process_res=process_res,
+                process_res_method=process_res_method
+            )
 
-                predictions.depth = np.squeeze(predictions.depth)
-                predictions.conf -= 1.0
+            predictions.depth = np.squeeze(predictions.depth)
+            predictions.conf -= 1.0
 
-                print(predictions.processed_images.shape)  # [N, H, W, 3] uint8
-                print(predictions.depth.shape)  # [N, H, W] float32
-                print(predictions.conf.shape)  # [N, H, W] float32
-                print(predictions.extrinsics.shape)  # [N, 3, 4] float32 (w2c)
-                print(predictions.intrinsics.shape)  # [N, 3, 3] float32
+            print(predictions.processed_images.shape)  # [N, H, W, 3] uint8
+            print(predictions.depth.shape)  # [N, H, W] float32
+            print(predictions.conf.shape)  # [N, H, W] float32
+            print(predictions.extrinsics.shape)  # [N, 3, 4] float32 (w2c)
+            print(predictions.intrinsics.shape)  # [N, 3, 3] float32
 
-                # Preview the last frame of the chunk if requested
-                if preview_callback is not None and not is_loop:
-                    import cv2
-                    d = predictions.depth[-1]
-                    d_vis = d.max() - d
-                    d_norm = cv2.normalize(d_vis, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                    d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
-                    preview_rgb = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)
-                    preview_callback(preview_rgb)
+            # Preview the last frame of the chunk if requested
+            if preview_callback is not None and not is_loop:
+                import cv2
+                d = predictions.depth[-1]
+                d_vis = d.max() - d
+                d_norm = cv2.normalize(d_vis, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
+                preview_rgb = cv2.cvtColor(d_color, cv2.COLOR_BGR2RGB)
+                preview_callback(preview_rgb)
 
         if torch.cuda.is_available(): torch.cuda.empty_cache()
         if torch.backends.mps.is_available(): torch.mps.empty_cache()
