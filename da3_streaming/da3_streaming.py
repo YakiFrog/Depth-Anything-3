@@ -338,19 +338,11 @@ class DA3_Streaming:
         if torch.cuda.is_available(): torch.cuda.empty_cache()
         if torch.backends.mps.is_available(): torch.mps.empty_cache()
         with torch.no_grad():
-            images = chunk_image_paths
-            # images: ['xxx.png', 'xxx.png', ...]
+            with torch.autocast(device_type=self.device, dtype=self.dtype):
+                images = chunk_image_paths
+                # images: ['xxx.png', 'xxx.png', ...]
 
-            process_res = self.config["Model"].get("process_res", 504)
-            process_res_method = self.config["Model"].get("process_res_method", "upper_bound_resize")
-            
-            predictions = self.model.inference(
-                images, 
-                ref_view_strategy=ref_view_strategy, 
-                infer_gs=infer_gs,
-                process_res=process_res,
-                process_res_method=process_res_method
-            )
+                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy, infer_gs=infer_gs)
 
             predictions.depth = np.squeeze(predictions.depth)
             predictions.conf -= 1.0
