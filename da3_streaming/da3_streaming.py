@@ -432,7 +432,7 @@ class DA3_Streaming:
             )
             scale_factor = scale_factor_return
 
-        s, R, t, residual = weighted_align_point_maps(
+        s, R, t = weighted_align_point_maps(
             point_map1,
             conf1,
             point_map2,
@@ -444,9 +444,8 @@ class DA3_Streaming:
         print("Estimated Scale:", s)
         print("Estimated Rotation:\n", R)
         print("Estimated Translation:", t)
-        print("Estimated Residual:", residual)
 
-        return s, R, t, residual
+        return s, R, t
 
     def get_loop_sim3_from_loop_predict(self, loop_predict_list):
         loop_sim3_list = []
@@ -502,7 +501,7 @@ class DA3_Streaming:
                 chunk_a_depth_conf = None
                 chunk_a_loop_depth_conf = None
 
-            s_a, R_a, t_a, res_a = self.align_2pcds(
+            s_a, R_a, t_a = self.align_2pcds(
                 point_map_a,
                 conf_a,
                 point_map_loop_a,
@@ -544,7 +543,7 @@ class DA3_Streaming:
                 chunk_b_depth_conf = None
                 chunk_b_loop_depth_conf = None
 
-            s_b, R_b, t_b, res_b = self.align_2pcds(
+            s_b, R_b, t_b = self.align_2pcds(
                 point_map_b,
                 conf_b,
                 point_map_loop_b,
@@ -554,13 +553,6 @@ class DA3_Streaming:
                 chunk_b_depth_conf,
                 chunk_b_loop_depth_conf,
             )
-
-            # Geometric Verification (Residual Filtering)
-            mean_res = (res_a + res_b) / 2.0
-            threshold = self.config["Loop"].get("residual_threshold", 0.5)
-            if mean_res > threshold:
-                print(f"[REJECT] Loop {chunk_idx_a}-{chunk_idx_b} rejected (res: {mean_res:.4f} > {threshold})")
-                continue
 
             print("a -> b SIM 3")
             s_ab, R_ab, t_ab = compute_sim3_ab((s_a, R_a, t_a), (s_b, R_b, t_b))
@@ -668,7 +660,7 @@ class DA3_Streaming:
                     chunk1_depth_conf = None
                     chunk2_depth_conf = None
 
-                s, R, t, res = self.align_2pcds(
+                s, R, t = self.align_2pcds(
                     point_map1,
                     conf1,
                     point_map2,
