@@ -16,10 +16,19 @@ from depth_anything_3.api import DepthAnything3
 from loop_utils.alignment_torch import (
     robust_weighted_estimate_sim3_torch,
     depth_to_point_cloud_optimized_torch,
+    apply_sim3_direct_torch,
+)
+from loop_utils.loop_detector import LoopDetector
+from loop_utils.sim3loop import Sim3LoopOptimizer
+from loop_utils.sim3utils import (
+    process_loop_list,
+    compute_sim3_ab,
+    accumulate_sim3_transforms
 )
 
 class DepthProcessor(QThread):
     frame_processed = Signal(np.ndarray, np.ndarray, np.ndarray)  # rgb_frame, depth_map, extrinsics
+    optimization_finished = Signal(list) # list of optimized global extrinsics
     finished = Signal()
 
     def __init__(self, video_path, model_name="depth-anything/DA3-SMALL", process_res=756, batch_size=8, overlap=4, strategy="saddle_balanced"):
@@ -49,8 +58,16 @@ class DepthProcessor(QThread):
         self.cum_R = np.eye(3, dtype=np.float32)
         self.cum_t = np.zeros(3, dtype=np.float32)
         
+        # Data for Global Optimization
+        self.sim3_list = []      # Relative Sim3 transforms between chunks
+        self.chunk_indices = []  # [(start, end), ...] for each chunk
+        self.prediction_paths = [] # Paths to saved .npy chunks
+        self.temp_dir = os.path.join(project_root, "temp_chunks")
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
         # Buffer for overlap frames from previous batch
         self.prev_batch_data = None # (depths, intrinsics, extrinsics, confs)
+        self.processed_frame_count = 0
 
     def apply_cum_sim3_to_ext(self, chunk_ext):
         """
@@ -171,6 +188,18 @@ class DepthProcessor(QThread):
                     self.cum_R = R_new
                     self.cum_s = s_new
                     self.cum_t = t_new
+                    
+                    self.sim3_list.append((s_rel, R_rel, t_rel))
+
+                # Store chunk info
+                chunk_start = self.processed_frame_count
+                chunk_end = chunk_start + len(frames_buffer)
+                self.chunk_indices.append((chunk_start, chunk_end))
+                
+                # Save chunk data to disk to save RAM
+                chunk_path = os.path.join(self.temp_dir, f"chunk_{len(self.prediction_paths)}.npy")
+                np.save(chunk_path, prediction)
+                self.prediction_paths.append(chunk_path)
 
                 # Transform extrinsics to global coordinates
                 global_exts = self.apply_cum_sim3_to_ext(prediction.extrinsics)
@@ -192,6 +221,8 @@ class DepthProcessor(QThread):
                     if not self.running: break
                     self.frame_processed.emit(frames_buffer[i], prediction.depth[i], global_exts[i])
                 
+                self.processed_frame_count += (len(frames_buffer) - emit_start)
+
                 # Store data for next alignment
                 self.prev_batch_data = {
                     'depth': prediction.depth,
@@ -259,3 +290,174 @@ class DepthProcessor(QThread):
 
     def stop(self):
         self.running = False
+
+    def optimize_trajectory(self):
+        """
+        Post-processing: Detect loops and optimize the whole trajectory.
+        """
+        try:
+            if not self.prediction_paths:
+                print("No chunks to optimize.")
+                return
+
+            print("Starting Global Optimization...")
+            
+            # 1. Prepare keyframe images for LoopDetector
+            img_temp_dir = os.path.join(self.temp_dir, "images")
+            os.makedirs(img_temp_dir, exist_ok=True)
+            
+            # Since we don't store all RGB frames in RAM, we might need to re-read video
+            # or extract them during initial processing. 
+            # To be efficient, let's assume we extract them here (limited to keyframes).
+            cap = cv2.VideoCapture(self.video_path)
+            
+            # For simplicity, extract 1 frame per chunk (the middle frame)
+            kf_paths = []
+            for i, (start, end) in enumerate(self.chunk_indices):
+                mid_idx = (start + end) // 2
+                cap.set(cv2.CAP_PROP_POS_FRAMES, mid_idx)
+                ret, frame = cap.read()
+                if ret:
+                    p = os.path.join(img_temp_dir, f"chunk_{i:04d}.jpg")
+                    cv2.imwrite(p, frame)
+                    kf_paths.append(p)
+            cap.release()
+
+            if not kf_paths:
+                print("Failed to extract keyframes for loop detection.")
+                return
+
+            # 2. Loop Detection
+            config = {
+                "Weights": {"SALAD": os.path.join(da3_streaming_path, "weights", "dino_salad.ckpt")},
+                "Loop": {
+                    "SALAD": {
+                        "image_size": [336, 336],
+                        "batch_size": 32,
+                        "similarity_threshold": 0.85,
+                        "top_k": 5,
+                        "use_nms": True,
+                        "nms_threshold": 5 # Smaller threshold for chunks
+                    },
+                    "SIM3_Optimizer": {
+                        "max_iterations": 30,
+                        "lambda_init": 1e-6
+                    }
+                }
+            }
+            
+            detector = LoopDetector(img_temp_dir, config=config)
+            loop_closures = detector.run() # List of (idx1, idx2, score)
+            
+            if not loop_closures:
+                print("No loop closures detected.")
+                # Even if no loops, we could technically run optimization, 
+                # but it won't change sequential poses.
+                # However, let's send the current poses back as "optimized" to show we finished.
+                self.emit_final_poses()
+                return
+
+            print(f"Found {len(loop_closures)} loop closures.")
+
+            # 3. Estimate Sim3 for loop constraints
+            loop_constraints = []
+            for i1, i2, score in loop_closures:
+                # i1, i2 are indices of CHUNKS
+                # We need to find the relative Sim3 between chunk i1 and chunk i2
+                # In this simplified version, we'll align the overlap regions if possible, 
+                # but since they might be far apart, we'll align the middle part of chunks.
+                
+                chunk_a = np.load(self.prediction_paths[i1], allow_pickle=True).item()
+                chunk_b = np.load(self.prediction_paths[i2], allow_pickle=True).item()
+                
+                # Align chunk b to chunk a
+                # pcd_a = depth_to_point_cloud_optimized_torch(chunk_a.depth, chunk_a.intrinsics, chunk_a.extrinsics)
+                # pcd_b = depth_to_point_cloud_optimized_torch(chunk_b.depth, chunk_b.intrinsics, chunk_b.extrinsics)
+                
+                # For robustness, just use the middle frame point cloud from each
+                mid_a = len(chunk_a.depth) // 2
+                mid_b = len(chunk_b.depth) // 2
+                
+                pcd_a = depth_to_point_cloud_optimized_torch(
+                    chunk_a.depth[mid_a:mid_a+1], 
+                    chunk_a.intrinsics[mid_a:mid_a+1], 
+                    chunk_a.extrinsics[mid_a:mid_a+1]
+                ).reshape(-1, 3)
+                
+                pcd_b = depth_to_point_cloud_optimized_torch(
+                    chunk_b.depth[mid_b:mid_b+1], 
+                    chunk_b.intrinsics[mid_b:mid_b+1], 
+                    chunk_b.extrinsics[mid_b:mid_b+1]
+                ).reshape(-1, 3)
+                
+                conf_a = chunk_a.conf[mid_a:mid_a+1].reshape(-1)
+                conf_b = chunk_b.conf[mid_b:mid_b+1].reshape(-1)
+                
+                weights = (conf_a * conf_b)
+                
+                s_rel, R_rel, t_rel = robust_weighted_estimate_sim3_torch(
+                    pcd_b.cpu().numpy(), 
+                    pcd_a.cpu().numpy(), 
+                    weights.cpu().numpy(),
+                    align_method="sim3"
+                )
+                
+                loop_constraints.append((i1, i2, (s_rel, R_rel, t_rel)))
+
+            # 4. Global Optimization
+            optimizer = Sim3LoopOptimizer(config)
+            optimized_sim3 = optimizer.optimize(self.sim3_list, loop_constraints)
+            
+            # 5. Apply optimized transforms and emit
+            self.emit_final_poses(optimized_sim3)
+
+        except Exception as e:
+            print(f"Optimization error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def emit_final_poses(self, optimized_sim3_list=None):
+        """
+        Calculate global poses using (optionally optimized) Sim3 list and emit.
+        """
+        all_optimized_exts = []
+        
+        # If no optimized list, use identity/existing sequential accumulated ones.
+        # But it's easier to just re-accumulate from sim3_list.
+        
+        # Identity for first chunk
+        T_cum = (1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32))
+        
+        # Process first chunk
+        chunk0 = np.load(self.prediction_paths[0], allow_pickle=True).item()
+        
+        # First chunk gets NO transform (or identity)
+        for i in range(len(chunk0.extrinsics)):
+            w2c = np.eye(4, dtype=np.float32)
+            w2c[:3, :] = chunk0.extrinsics[i]
+            all_optimized_exts.append(w2c.flatten().tolist())
+            
+        # Subsequent chunks
+        current_sim3 = optimized_sim3_list if optimized_sim3_list else self.sim3_list
+        accum_sim3 = accumulate_sim3_transforms(current_sim3)
+        
+        for chunk_idx in range(1, len(self.prediction_paths)):
+            s, R, t = accum_sim3[chunk_idx - 1]
+            chunk_data = np.load(self.prediction_paths[chunk_idx], allow_pickle=True).item()
+            
+            S = np.eye(4, dtype=np.float32)
+            S[:3, :3] = s * R
+            S[:3, 3] = t
+            
+            for i in range(len(chunk_data.extrinsics)):
+                w2c = np.eye(4, dtype=np.float32)
+                w2c[:3, :] = chunk_data.extrinsics[i]
+                c2w = np.linalg.inv(w2c)
+                
+                transformed_c2w = S @ c2w
+                transformed_c2w[:3, :3] /= s
+                
+                transformed_w2c = np.linalg.inv(transformed_c2w)
+                all_optimized_exts.append(transformed_w2c.flatten().tolist())
+
+        self.optimization_finished.emit(all_optimized_exts)

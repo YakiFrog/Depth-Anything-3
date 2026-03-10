@@ -58,6 +58,8 @@
         <input type="range" id="depthScale" min="1" max="100" value="20">
         <span>Point Size:</span>
         <input type="range" id="pointSize" min="1" max="50" value="10">
+        <span>Min Move:</span>
+        <input type="range" id="minMove" min="0" max="100" value="5">
         <label><input type="checkbox" id="usePose"> Use Pose</label>
         <label><input type="checkbox" id="worldFixed"> World Fixed</label>
         <label><input type="checkbox" id="showMap"> Show Map</label>
@@ -82,7 +84,7 @@
         let scene, camera, renderer, controls, points, cameraHelper;
         let geometry, material, trajectoryLine, trajectoryGeometry;
         const MAX_POINTS = 100000;
-        const MAX_MAP_POINTS = 1000000;
+        const MAX_MAP_POINTS = 10000000;
         const MAX_TRAJECTORY_POINTS = 5000;
         let data_received_count = 0;
 
@@ -98,11 +100,15 @@
         let lastFrameTime = 0;
         const TARGET_FPS = 30;
 
+        let lastStoredPose = new THREE.Matrix4();
+        let isFirstFrameStored = false;
+
         const playPauseBtn = document.getElementById('playPauseBtn');
         const timeline = document.getElementById('timeline');
         const frameInfo = document.getElementById('frameInfo');
         const depthScaleSlider = document.getElementById('depthScale');
         const pointSizeSlider = document.getElementById('pointSize');
+        const minMoveSlider = document.getElementById('minMove');
         const usePoseCheckbox = document.getElementById('usePose');
         const worldFixedCheckbox = document.getElementById('worldFixed');
         const showMapCheckbox = document.getElementById('showMap');
@@ -229,19 +235,65 @@
 
             ws.onmessage = (event) => {
                 try {
-                    const data = JSON.parse(event.data);
-                    frames.push(data);
+                    const rawData = JSON.parse(event.data);
+
+                    if (rawData.type === "optimize") {
+                        // Global Optimization results
+                        const optExts = rawData.extrinsics;
+                        console.log(`Received optimized extrinsics for ${optExts.length} frames`);
+                        // We need to match these with our stored kf_frames or frames.
+                        // For now, let's assume frames.length matches optExts.length for simple cases,
+                        // or just update the ones that match.
+                        for (let i = 0; i < Math.min(frames.length, optExts.length); i++) {
+                            frames[i].extrinsics = new Float32Array(optExts[i]);
+                        }
+                        // Clear map and re-accumulate might be too expensive, 
+                        // but trajectory line should be updated.
+                        updateTrajectory();
+                        renderFrame(frames[currentFrameIndex], false);
+                        statusDiv.innerText = "Trajectory Optimized!";
+                        return;
+                    }
+
+                    // Keyframe logic
+                    if (isFirstFrameStored) {
+                        const currentPose = new THREE.Matrix4().fromArray(rawData.extrinsics).transpose();
+                        const dist = new THREE.Vector3().setFromMatrixPosition(currentPose).distanceTo(new THREE.Vector3().setFromMatrixPosition(lastStoredPose));
+                        const threshold = parseFloat(minMoveSlider.value) * 0.01;
+
+                        if (dist < threshold) {
+                            // Update the "live" view with current data but don't store it
+                            renderFrame(rawData, false); // false = don't accumulate
+                            statusDiv.innerText = "Skipping (Small movement)";
+                            return;
+                        }
+                        lastStoredPose.copy(currentPose);
+                    } else {
+                        lastStoredPose.fromArray(rawData.extrinsics).transpose();
+                        isFirstFrameStored = true;
+                    }
+
+                    // Pack data into Typed Arrays to save RAM
+                    const packedData = {
+                        depth: new Float32Array(rawData.depth),
+                        rgb: new Uint8Array(rawData.rgb),
+                        extrinsics: new Float32Array(rawData.extrinsics),
+                        width: rawData.width,
+                        height: rawData.height
+                    };
+
+                    frames.push(packedData);
                     // Keep buffer large but manageable (e.g., 100,000 frames)
                     if (frames.length > 100000) frames.shift();
 
                     // If not paused, and we were at the end or it's the first frame, advance
                     if (!isPaused && (currentFrameIndex === frames.length - 2 || frames.length === 1)) {
                         currentFrameIndex = frames.length - 1;
-                        renderFrame(data);
+                        renderFrame(packedData, true);
                     }
 
                     updateUI();
-                    statusDiv.innerText = "Receiving data";
+                    statusDiv.innerText = `Receiving data (${frames.length} KF)`;
                 } catch (e) {
                     console.error("Parse error:", e);
                 }
@@ -257,7 +309,7 @@
             };
         }
 
-        function renderFrame(data) {
+        function renderFrame(data, shouldAccumulate = true) {
             const depth = data.depth;
             const rgb = data.rgb;
             const width = data.width;
@@ -362,18 +414,8 @@
             geometry.computeBoundingSphere();
 
             // Accumulate to Map
-            if (showMapCheckbox.checked && usePoseCheckbox.checked && extrinsics && extrinsics.length === 16) {
-                // Only process each unique frame index once for the map to avoid over-accumulation
-                const frameId = data.frame_index !== undefined ? data.frame_index : frames.indexOf(data);
-                if (!lastProcessedFrameIndices.has(frameId)) {
-                    accumulateToMap(data, count, step);
-                    lastProcessedFrameIndices.add(frameId);
-                    // Keep the set size reasonable
-                    if (lastProcessedFrameIndices.size > 100) {
-                        const first = lastProcessedFrameIndices.values().next().value;
-                        lastProcessedFrameIndices.delete(first);
-                    }
-                }
+            if (shouldAccumulate && showMapCheckbox.checked && usePoseCheckbox.checked && extrinsics && extrinsics.length === 16) {
+                accumulateToMap(data, count, step);
             }
         }
 
@@ -394,7 +436,9 @@
             const scaleFactor = parseFloat(depthScaleSlider.value) * 0.01;
 
             // Map accumulation might need even more aggressive downsampling
-            const mapStep = Math.max(step, Math.floor((width * height) / 5000)); // Max 5000 points per frame for map
+            // For 10M total points, if we have 6000 frames, only ~1600 points per frame.
+            // But with keyframing, we have fewer frames.
+            const mapStep = Math.max(step, Math.floor((width * height) / 3000)); // Max 3000 pts/KF
 
             for (let i = 0; i < width * height; i += mapStep) {
                 if (mapPointCount >= MAX_MAP_POINTS) break;
@@ -411,9 +455,9 @@
                 mapPositions[mapPointCount * 3 + 1] = worldPos.y;
                 mapPositions[mapPointCount * 3 + 2] = worldPos.z;
 
-                mapColors[mapPointCount * 3] = (rgb[i * 3] || 0) / 255;
-                mapColors[mapPointCount * 3 + 1] = (rgb[i * 3 + 1] || 0) / 255;
-                mapColors[mapPointCount * 3 + 2] = (rgb[i * 3 + 2] || 0) / 255;
+                mapColors[mapPointCount * 3] = (rgb[i * 3] || 0) / 255.0;
+                mapColors[mapPointCount * 3 + 1] = (rgb[i * 3 + 1] || 0) / 255.0;
+                mapColors[mapPointCount * 3 + 2] = (rgb[i * 3 + 2] || 0) / 255.0;
 
                 mapPointCount++;
             }

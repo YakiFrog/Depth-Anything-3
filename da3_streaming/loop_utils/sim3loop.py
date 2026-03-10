@@ -24,10 +24,10 @@ from scipy.spatial.transform import Rotation as R
 
 cpp_version = False
 try:
-    import sim3solve
+    from fastloop import sim3solve
 
     cpp_version = True
-except Exception:
+except ImportError:
     print("Sim3solve of C++ Version failed, Will using Python Version.")
 
 

@@ -163,16 +163,15 @@ class DA3_Streaming:
 
         self.delete_temp_files = self.config["Model"]["delete_temp_files"]
 
-        print("Loading model...")
-
-        with open(self.config["Weights"]["DA3_CONFIG"]) as f:
-            config = json.load(f)
-        self.model = DepthAnything3(**config)
-        weight = load_file(self.config["Weights"]["DA3"])
-        self.model.load_state_dict(weight, strict=False)
-
-        self.model.eval()
-        self.model = self.model.to(self.device)
+        if self.config["Weights"]["DA3"] != "none" and self.config["Weights"]["DA3_CONFIG"] != "none":
+            with open(self.config["Weights"]["DA3_CONFIG"]) as f:
+                config = json.load(f)
+            self.model = DepthAnything3(**config)
+            weight = load_file(self.config["Weights"]["DA3"])
+            self.model.load_state_dict(weight, strict=False)
+            self.model = self.model.to(self.device).eval()
+        else:
+            self.model = None
 
         self.skyseg_session = None
 
@@ -250,7 +249,7 @@ class DA3_Streaming:
                 )
         print("")
 
-    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False):
+    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False, preview_callback=None):
         start_idx, end_idx = range_1
         chunk_image_paths = self.img_list[start_idx:end_idx]
         if range_2 is not None:
@@ -302,6 +301,10 @@ class DA3_Streaming:
             self.all_camera_intrinsics.append((chunk_range, intrinsics))
 
         np.save(save_path, predictions)
+
+        if preview_callback and not is_loop:
+            # Emit the last frame of the chunk as a preview
+            preview_callback(predictions.processed_images[-1])
 
         return predictions
 
@@ -520,7 +523,7 @@ class DA3_Streaming:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.close()
 
-    def process_long_sequence(self):
+    def process_long_sequence(self, progress_callback=None, preview_callback=None):
         if self.overlap >= self.chunk_size:
             raise ValueError(
                 f"[SETTING ERROR] Overlap ({self.overlap}) \
@@ -538,8 +541,10 @@ class DA3_Streaming:
         for chunk_idx in range(len(self.chunk_indices)):
             print(f"[Progress]: {chunk_idx}/{len(self.chunk_indices)}")
             cur_predictions = self.process_single_chunk(
-                self.chunk_indices[chunk_idx], chunk_idx=chunk_idx
+                self.chunk_indices[chunk_idx], chunk_idx=chunk_idx, preview_callback=preview_callback
             )
+            if progress_callback:
+                progress_callback(chunk_idx, len(self.chunk_indices), f"Processing chunk {chunk_idx+1}/{len(self.chunk_indices)}...")
             torch.cuda.empty_cache()
 
             if chunk_idx > 0:
@@ -626,6 +631,8 @@ class DA3_Streaming:
         print("Apply alignment")
         self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
         for chunk_idx in range(len(self.chunk_indices) - 1):
+            if progress_callback:
+                progress_callback(chunk_idx, len(self.chunk_indices) - 1, f"Aligning chunk {chunk_idx+1}/{len(self.chunk_indices)-1}...")
             print(f"Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})")
             s, R, t = self.sim3_list[chunk_idx]
 
@@ -698,7 +705,7 @@ class DA3_Streaming:
 
         print("Done.")
 
-    def run(self):
+    def run(self, progress_callback=None, preview_callback=None):
         print(f"Loading images from {self.img_dir}...")
         self.img_list = sorted(
             glob.glob(os.path.join(self.img_dir, "*.jpg"))
@@ -709,7 +716,7 @@ class DA3_Streaming:
             raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
         print(f"Found {len(self.img_list)} images")
 
-        self.process_long_sequence()
+        self.process_long_sequence(progress_callback=progress_callback, preview_callback=preview_callback)
 
     def save_camera_poses(self):
         """

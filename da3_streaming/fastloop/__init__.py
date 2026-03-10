@@ -12,4 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Adapted from [VGGT-Long](https://github.com/DengKaiCQ/VGGT-Long)
+# ... (headers) ...
+try:
+    from . import sim3solve
+except ImportError:
+    pass

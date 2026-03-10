@@ -35,10 +35,19 @@ async def broadcast_data(data):
 
 @app.post("/update")
 async def update_data(data: dict):
-    print(f"DEBUG: Server received update. Keys: {list(data.keys())}")
+    # print(f"DEBUG: Server received update. Keys: {list(data.keys())}")
     global latest_data
     latest_data = data
     await broadcast_data(data)
+    return {"status": "ok"}
+
+@app.post("/global_optimize")
+async def global_optimize(data: dict):
+    """
+    Receives a list of optimized extrinsics and broadcasts them.
+    data: {"type": "optimize", "extrinsics": [list of 16-float lists]}
+    """
+    await broadcast_data({"type": "optimize", "extrinsics": data["extrinsics"]})
     return {"status": "ok"}
 
 script_dir = os.path.dirname(os.path.abspath(__file__))

@@ -67,6 +67,10 @@ class MainWindow(QMainWindow):
 
         self.view_3d_button = QPushButton("Open 3D Viewer")
         self.view_3d_button.clicked.connect(self.open_3d_viewer)
+
+        self.optimize_button = QPushButton("Global Optimize")
+        self.optimize_button.clicked.connect(self.run_global_optimization)
+        self.optimize_button.setEnabled(False)
         
         self.controls_layout.addWidget(self.load_button)
         self.controls_layout.addWidget(QLabel("Model:"))
@@ -77,6 +81,7 @@ class MainWindow(QMainWindow):
         self.controls_layout.addWidget(self.strategy_combo)
         self.controls_layout.addWidget(self.start_button)
         self.controls_layout.addWidget(self.stop_button)
+        self.controls_layout.addWidget(self.optimize_button)
         self.controls_layout.addWidget(self.view_3d_button)
         self.layout.addLayout(self.controls_layout)
 
@@ -145,7 +150,31 @@ class MainWindow(QMainWindow):
         self.model_combo.setEnabled(True)
         self.res_combo.setEnabled(True)
         self.strategy_combo.setEnabled(True)
-        self.statusBar().showMessage("Processing Finished or Stopped")
+        self.optimize_button.setEnabled(True)
+        self.statusBar().showMessage("Processing Finished. You can now Global Optimize.")
+
+    def run_global_optimization(self):
+        if self.processor:
+            self.statusBar().showMessage("Running Global Optimization (Loop Closure)... this may take a while.")
+            self.optimize_button.setEnabled(False)
+            self.processor.optimization_finished.connect(self.on_optimization_finished)
+            # Start optimization in a separate thread if needed, but DepthProcessor is already a thread.
+            # However, run() has finished, so we can call a new method.
+            threading.Thread(target=self.processor.optimize_trajectory, daemon=True).start()
+
+    def on_optimization_finished(self, optimized_extrinsics):
+        self.statusBar().showMessage("Optimization Finished! Sending to viewer...")
+        self.optimize_button.setEnabled(True)
+        # Send optimized extrinsics to viewer
+        try:
+            # extrinsics here should be a list of 4x4 matrices (lists of lists or flattened)
+            data = {
+                "type": "optimize",
+                "extrinsics": optimized_extrinsics
+            }
+            requests.post("http://127.0.0.1:8000/global_optimize", json=data, timeout=10.0)
+        except Exception as e:
+            print(f"Error sending optimization to viewer: {e}")
 
     @Slot(np.ndarray, np.ndarray, np.ndarray)
     def update_frames(self, rgb_frame, depth_map, extrinsics):
