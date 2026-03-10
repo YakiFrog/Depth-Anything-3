@@ -36,3 +36,4 @@ temp*.png
 venv/
 .venv/
 *.mp4
+da3_streaming/weights/*.ckpt
